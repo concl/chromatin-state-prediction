@@ -1,193 +1,361 @@
-
-import os
 import torch
-import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import pandas as pd
 import numpy as np
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    get_linear_schedule_with_warmup
-)
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from torch.amp import autocast, GradScaler
+import torch.nn.functional as F
+from sklearn.metrics import confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
+import matplotlib.pyplot as plt
+import seaborn as sns
+from Bio import pairwise2
+from torch.cuda.amp import autocast, GradScaler
 
-# Config
-SEQ_FILE   = "C:/Users/aravp/Internships/Ernst/chr4_sampled_20Mb_block.csv"
-LABEL_FILE = "C:/Users/aravp/Internships/Ernst/chr4_sampled_20Mb_chromatin_states.csv"
+# ==============================
+# SETTINGS
+# ==============================
 
 MODEL_NAME = "zhihan1996/DNA_bert_6"
-
-NUM_CLASSES = 19
-BATCH_SIZE = 8
+MAX_LENGTH = 600
+BATCH_SIZE = 64
 EPOCHS = 10
-LR = 2e-5
-MAX_LEN = 256
+NUM_CLASSES = 19
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Running on:", DEVICE)
 
-scaler = GradScaler("cpu")  # CPU-friendly
+# ==============================
+# LOAD DATA
+# ==============================
 
-CHECKPOINT_DIR = "./dnabert_checkpoints"
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-LOG_EVERY_N_BATCHES = 4  # prints progress every 10 batches
+df = pd.read_csv("training_data.csv")
 
-# Reverse Complement
-def reverse_complement(seq):
-    complement = {"A":"T", "T":"A", "C":"G", "G":"C"}
-    return "".join(complement.get(base, base) for base in reversed(seq))
+sequences = df["sequence"].astype(str).values
+labels = df["label"].values
 
-# Load Data 
-seq_df = pd.read_csv(SEQ_FILE, header=None, names=["sequence"])
-lab_df = pd.read_csv(LABEL_FILE, header=None, names=["label"])
+# ==============================
+# BUILD 600bp CONTEXT WINDOWS
+# ==============================
 
-df = pd.concat([seq_df, lab_df], axis=1)
-df = df.dropna()
-df["sequence"] = df["sequence"].astype(str)
-df["label"] = df["label"] - 1  # convert labels to 0-index
+context_sequences = []
+context_labels = []
 
-# Data Augmentation (Reverse Complement)
-print("Original dataset size:", len(df))
-rev_df = df.copy()
-rev_df["sequence"] = rev_df["sequence"].apply(reverse_complement)
-df = pd.concat([df, rev_df])
-print("After reverse complement augmentation:", len(df))
+for i in range(1, len(sequences)-1):
 
+    combined_seq = sequences[i-1] + sequences[i] + sequences[i+1]
 
-train_df, val_df = train_test_split(
-    df,
-    test_size=0.2,
-    stratify=df["label"],
-    random_state=42
+    context_sequences.append(combined_seq)
+    context_labels.append(labels[i])  # predict middle state
+
+sequences = np.array(context_sequences)
+labels = np.array(context_labels)
+
+print("Total samples after context windows:", len(sequences))
+
+# ==============================
+# CLASS WEIGHTS
+# ==============================
+
+weights = compute_class_weight(
+    class_weight="balanced",
+    classes=np.unique(labels),
+    y=labels
 )
 
-# Oversampling Rare Classes
-label_counts = train_df["label"].value_counts()
-weights = 1 / label_counts
-sample_weights = train_df["label"].map(weights).values
-sampler = WeightedRandomSampler(
-    weights=sample_weights,
-    num_samples=len(sample_weights),
-    replacement=True
-)
+class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
 
-# Tokenizer
+print("Class weights:", class_weights)
+
+# ==============================
+# TOKENIZER
+# ==============================
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-# Dataset
+print("Tokenizing dataset...")
+
+encodings = tokenizer(
+    list(sequences),
+    padding=True,
+    truncation=True,
+    max_length=MAX_LENGTH,
+    return_tensors="pt"
+)
+
+# ==============================
+# DATASET
+# ==============================
+
 class DNADataset(Dataset):
-    def __init__(self, df):
-        self.seqs = df["sequence"].tolist()
-        self.labels = df["label"].tolist()
+
+    def __init__(self, encodings, labels, sequences):
+
+        self.encodings = encodings
+        self.labels = labels
+        self.sequences = sequences
 
     def __len__(self):
-        return len(self.seqs)
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        seq = self.seqs[idx]
-        label = self.labels[idx]
-        encoding = tokenizer(
-            seq,
-            truncation=True,
-            padding="max_length",
-            max_length=MAX_LEN,
-            return_tensors="pt"
-        )
-        item = {k: v.squeeze(0) for k, v in encoding.items()}
-        item["labels"] = torch.tensor(label).long()
+
+        item = {key: val[idx] for key, val in self.encodings.items()}
+        item["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
+        item["sequence"] = self.sequences[idx]
+
         return item
 
-train_dataset = DNADataset(train_df)
-val_dataset   = DNADataset(val_df)
+
+dataset = DNADataset(encodings, labels, sequences)
+
+train_size = int(0.9 * len(dataset))
+val_size = len(dataset) - train_size
+
+train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
 train_loader = DataLoader(
     train_dataset,
     batch_size=BATCH_SIZE,
-    sampler=sampler
-)
-val_loader = DataLoader(
-    val_dataset,
-    batch_size=BATCH_SIZE
+    shuffle=True,
+    num_workers=6,
+    pin_memory=True
 )
 
-# Model
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    num_workers=6,
+    pin_memory=True
+)
+
+# ==============================
+# MODEL
+# ==============================
+
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL_NAME,
     num_labels=NUM_CLASSES
 )
-model.to(device)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+model.to(DEVICE)
 
-# LR Scheduler
-total_steps = len(train_loader) * EPOCHS
-scheduler = get_linear_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps=int(0.1 * total_steps),
-    num_training_steps=total_steps
-)
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
-criterion = nn.CrossEntropyLoss()
+scaler = GradScaler()
 
-# Training Loop
+# ==============================
+# TRAINING LOOP
+# ==============================
+
 for epoch in range(EPOCHS):
+
     model.train()
     total_loss = 0
-    print(f"\n=== Epoch {epoch+1}/{EPOCHS} ===")
 
-    for batch_idx, batch in enumerate(train_loader, 1):
-        batch = {k: v.to(device) for k, v in batch.items()}
+    for batch in train_loader:
 
         optimizer.zero_grad()
-        with autocast(device_type="cpu"):  # CPU-friendly autocast
-            outputs = model(**batch)
-            loss = criterion(outputs.logits, batch["labels"])
+
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        labels = batch["labels"].to(DEVICE)
+
+        with autocast():
+
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+
+            logits = outputs.logits
+
+            loss = F.cross_entropy(
+                logits,
+                labels,
+                weight=class_weights
+            )
 
         scaler.scale(loss).backward()
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()
 
         total_loss += loss.item()
 
-        if batch_idx % LOG_EVERY_N_BATCHES == 0:
-            avg_batch_loss = total_loss / batch_idx
-            print(f"Batch {batch_idx}/{len(train_loader)} | Avg Loss: {avg_batch_loss:.4f}")
-
     avg_loss = total_loss / len(train_loader)
 
-    # Validation
-    model.eval()
-    all_preds, all_labels = [], []
+    print(f"Epoch {epoch+1}/{EPOCHS} Loss:", avg_loss)
 
-    with torch.no_grad():
-        for batch in val_loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch)
-            preds = torch.argmax(outputs.logits, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(batch["labels"].cpu().numpy())
+# ==============================
+# EVALUATION
+# ==============================
 
-    acc = accuracy_score(all_labels, all_preds)
-    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
-        all_labels, all_preds, average="macro", zero_division=0
-    )
-    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
-        all_labels, all_preds, average="weighted", zero_division=0
-    )
+model.eval()
 
-    print(f"\nEpoch {epoch+1}/{EPOCHS} Summary")
-    print(f"Train Loss: {avg_loss:.4f}")
-    print(f"Accuracy: {acc:.4f}")
-    print(f"Macro F1: {f1_macro:.4f}")
-    print(f"Weighted F1: {f1_weighted:.4f}")
+all_preds = []
+all_labels = []
+all_probs = []
+all_sequences = []
 
-    # Save checkpoint
-    checkpoint_path = os.path.join(CHECKPOINT_DIR, f"dnabert_epoch{epoch+1}.pt")
-    torch.save(model.state_dict(), checkpoint_path)
-    print(f"Checkpoint saved: {checkpoint_path}")
-    ###
+with torch.no_grad():
+
+    for batch in val_loader:
+
+        input_ids = batch["input_ids"].to(DEVICE)
+        attention_mask = batch["attention_mask"].to(DEVICE)
+        labels = batch["labels"].to(DEVICE)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
+
+        logits = outputs.logits
+        probs = F.softmax(logits, dim=1)
+
+        preds = torch.argmax(logits, dim=1)
+
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_probs.extend(probs.cpu().numpy())
+        all_sequences.extend(batch["sequence"])
+
+# ==============================
+# CONFUSION MATRIX
+# ==============================
+
+cm = confusion_matrix(all_labels, all_preds)
+
+plt.figure(figsize=(10,8))
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+plt.title("Chromatin State Confusion Matrix")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.show()
+
+# ==============================
+# MOST CONFUSED STATES
+# ==============================
+
+confusions = []
+
+for i in range(len(cm)):
+    for j in range(len(cm)):
+        if i != j and cm[i][j] > 0:
+            confusions.append((i, j, cm[i][j]))
+
+confusions = sorted(confusions, key=lambda x: x[2], reverse=True)
+
+print("\nMost common misclassifications:")
+
+for a,p,c in confusions[:10]:
+    print(f"Actual {a} -> Predicted {p} : {c}")
+
+# ==============================
+# CONFIDENCE ANALYSIS
+# ==============================
+
+all_probs = np.array(all_probs)
+confidences = np.max(all_probs, axis=1)
+
+print("\nConfidence Stats")
+print("Average:", confidences.mean())
+print("Min:", confidences.min())
+print("Max:", confidences.max())
+
+plt.hist(confidences, bins=50)
+plt.title("Model Confidence Distribution")
+plt.xlabel("Softmax Probability")
+plt.ylabel("Frequency")
+plt.show()
+
+# ==============================
+# QUIESCENT STATE CONFIDENCE
+# ==============================
+
+QUIESCENT_LABEL = 18
+
+quiescent_conf = []
+
+for i,label in enumerate(all_labels):
+    if label == QUIESCENT_LABEL:
+        quiescent_conf.append(confidences[i])
+
+if len(quiescent_conf) > 0:
+    print("Average quiescent confidence:", np.mean(quiescent_conf))
+
+# ==============================
+# DISTANCE MATRIX ANALYSIS
+# ==============================
+
+try:
+
+    dist_df = pd.read_csv("chromatin_state_distances.csv", index_col=0)
+    distance_matrix = dist_df.values
+
+    distances = []
+
+    for true,pred in zip(all_labels, all_preds):
+
+        if true != pred:
+            distances.append(distance_matrix[true][pred])
+
+    if len(distances) > 0:
+        print("Average distance of misclassifications:", np.mean(distances))
+
+except:
+    print("Distance matrix not found, skipping.")
+
+# ==============================
+# GENOME TRACK VISUALIZATION
+# ==============================
+
+plt.figure(figsize=(14,4))
+
+plt.plot(all_labels[:1000], label="Actual")
+plt.plot(all_preds[:1000], label="Predicted")
+
+plt.title("Chromatin State Along DNA")
+plt.xlabel("Sequence Index")
+plt.ylabel("State")
+
+plt.legend()
+plt.show()
+
+# ==============================
+# MISCLASSIFIED SEQUENCES
+# ==============================
+
+misclassified = []
+
+for seq,true,pred in zip(all_sequences, all_labels, all_preds):
+
+    if true != pred:
+        misclassified.append((seq,true,pred))
+
+print("Total misclassified:", len(misclassified))
+
+# ==============================
+# SEQUENCE ALIGNMENT EXAMPLE
+# ==============================
+
+if len(misclassified) >= 2:
+
+    seq1 = misclassified[0][0]
+    seq2 = misclassified[1][0]
+
+    alignment = pairwise2.align.globalxx(seq1, seq2)[0]
+
+    print("\nExample sequence alignment:")
+    print(pairwise2.format_alignment(*alignment))
+
+# ==============================
+# SAVE MODEL
+# ==============================
+
+torch.save(model.state_dict(), "dnabert_chromatin_model.pt")
+
+print("Training complete.")
