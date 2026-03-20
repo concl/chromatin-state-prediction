@@ -1,14 +1,14 @@
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import pandas as pd
 import numpy as np
 import torch.nn.functional as F
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, matthews_corrcoef, f1_score
 from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 import seaborn as sns
-from Bio import pairwise2
 from torch.cuda.amp import autocast, GradScaler
 
 # ==============================
@@ -16,54 +16,194 @@ from torch.cuda.amp import autocast, GradScaler
 # ==============================
 
 MODEL_NAME = "zhihan1996/DNA_bert_6"
-MAX_LENGTH = 600
+MAX_LENGTH = 200  # 6-mer model; we will use 200bp input windows
+CHUNK_SIZE = 200
+CONTEXT_SIZE = 50  # context window around BED region
+STEP_SIZE = 50  # overlapping windows for full data coverage
 BATCH_SIZE = 64
 EPOCHS = 10
-NUM_CLASSES = 19
+NUM_CLASSES = 18  # maximum expected labels (will auto-adjust to actual classes)
+
+SAMPLE_FRACTION = 1.0  # use all BED regions for full run
+MAX_EXAMPLES = None  # no cap; process entire dataset
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Running on:", DEVICE)
 
 # ==============================
-# LOAD DATA
+# FILE PATHS (UPDATED FOR HOFFMAN2)
 # ==============================
 
-df = pd.read_csv("training_data.csv")
-
-sequences = df["sequence"].astype(str).values
-labels = df["label"].values
+user_home = os.path.expanduser("~")
+FASTA_PATH = "/u/home/a/aparikh/dnabert/chr4.fa"  # validate version with lab
+BED_DIR = "/u/project/ernst/ernst/IHEC/FOURCOLS_NOHEADER_BROWSERFILES_ANNOTATIONS_MERGEDBINARY_BYCELLWITHIMPUTED_EPIATLAS_INCLUDEONLY"
+TARGET_LIST_PATH = "/u/home/a/aparikh/dnabert/fully_observed_samples.txt"
+SAVE_PATH = os.path.join(user_home, "dnabert_results")
+os.makedirs(SAVE_PATH, exist_ok=True)
 
 # ==============================
-# BUILD 600bp CONTEXT WINDOWS
+# LOAD CHROMOSOME (FASTA)
 # ==============================
 
-context_sequences = []
-context_labels = []
+print("Loading chromosome...")
 
-for i in range(1, len(sequences)-1):
+dna_chunks = []
+with open(FASTA_PATH, "r") as f:
+    for line in f:
+        if line.startswith(">"):
+            continue
+        dna_chunks.append(line.strip().upper())
 
-    combined_seq = sequences[i-1] + sequences[i] + sequences[i+1]
+dna_sequence = "".join(dna_chunks)
 
-    context_sequences.append(combined_seq)
-    context_labels.append(labels[i])  # predict middle state
+print("Chromosome length:", len(dna_sequence))
 
-sequences = np.array(context_sequences)
-labels = np.array(context_labels)
+# ==============================
+# LOAD BED ANNOTATIONS
+# ==============================
 
-print("Total samples after context windows:", len(sequences))
+print("Loading target list and BED annotations...")
+
+# read required sample IDs
+with open(TARGET_LIST_PATH, "r") as f:
+    target_ids = {line.strip() for line in f if line.strip()}
+
+print(f"Loaded {len(target_ids)} target IDs")
+
+# find matching BED files in BED_DIR (can be .bed, .bed.gz, .zip)
+import glob, zipfile
+
+selected_paths = []
+for t in target_ids:
+    patterns = [f"{BED_DIR}/**/{t}*.bed", f"{BED_DIR}/**/{t}*.bed.gz", f"{BED_DIR}/**/{t}*.zip"]
+    for p in patterns:
+        selected_paths.extend(glob.glob(p, recursive=True))
+
+selected_paths = sorted(set(selected_paths))
+if len(selected_paths) == 0:
+    raise FileNotFoundError(f"No BED/ZIP files found for target IDs in {BED_DIR}")
+
+print(f"Found {len(selected_paths)} files for target IDs")
+
+# read and concatenate selected BED data
+frames = []
+for path in selected_paths:
+    if path.endswith(".zip"):
+        with zipfile.ZipFile(path, "r") as zf:
+            for member in zf.namelist():
+                if member.endswith(".bed") or member.endswith(".bed.gz"):
+                    with zf.open(member, "r") as f:
+                        frames.append(pd.read_csv(f, sep="\t", header=None, names=["chr", "start", "end", "state"]))
+    elif path.endswith(".gz"):
+        frames.append(pd.read_csv(path, sep="\t", header=None, names=["chr", "start", "end", "state"], compression="gzip"))
+    else:
+        frames.append(pd.read_csv(path, sep="\t", header=None, names=["chr", "start", "end", "state"]))
+
+if len(frames) == 0:
+    raise ValueError("No usable BED rows were loaded from selected files")
+
+bed_df = pd.concat(frames, ignore_index=True)
+
+# filter to only chromosome 4 regions (since FASTA is chr4.fa)
+bed_df = bed_df[bed_df["chr"] == "chr4"].reset_index(drop=True)
+
+if SAMPLE_FRACTION < 1.0:
+    bed_df = bed_df.sample(frac=SAMPLE_FRACTION, random_state=42).reset_index(drop=True)
+    print(f"Using sample fraction {SAMPLE_FRACTION:.0%}, selected {len(bed_df)} regions.")
+
+# extract numeric state and map to compact label range
+bed_df["state_num"] = bed_df["state"].str.split("_", n=1).str[0].astype(int)
+unique_state_nums = sorted(bed_df["state_num"].unique())
+state_to_label = {s: i for i, s in enumerate(unique_state_nums)}
+bed_df["label"] = bed_df["state_num"].map(state_to_label)
+
+print("Total BED regions:", len(bed_df))
+print("Unique chromatin states in data:", unique_state_nums)
+
+# ==============================
+# BUILD DATASET FROM GENOME
+# ==============================
+
+def reverse_complement(seq):
+    translation = str.maketrans("ACGTN", "TGCAN")
+    return seq.translate(translation)[::-1]
+
+
+def kmerize(seq, k=6, stride=1):
+    return " ".join([seq[i:i+k] for i in range(0, len(seq) - k + 1, stride)])
+
+sequences = []
+labels = []
+
+print("Extracting sequences from genome...")
+
+stop_early = False
+for _, row in bed_df.iterrows():
+
+    start = int(row["start"])
+    end = int(row["end"])
+    label = int(row["label"])
+
+    region_start = max(0, start - CONTEXT_SIZE)
+    region_end = min(len(dna_sequence), end + CONTEXT_SIZE)
+
+    if region_end - region_start < CHUNK_SIZE:
+        # enforce minimal window length by center padding if needed
+        center = (start + end) // 2
+        region_start = max(0, center - CHUNK_SIZE // 2)
+        region_end = min(len(dna_sequence), region_start + CHUNK_SIZE)
+
+    for chunk_start in range(region_start, region_end - CHUNK_SIZE + 1, STEP_SIZE):
+        seq = dna_sequence[chunk_start:chunk_start + CHUNK_SIZE].upper()
+
+        # skip sequences with unknown bases
+        if "N" in seq or len(seq) < CHUNK_SIZE:
+            continue
+
+        # raw 6-merization for DNA_BERT_6 (it treats tokens as 6-mers)
+        seq_kmers = kmerize(seq, k=6, stride=1)
+        sequences.append(seq_kmers)
+        labels.append(label)
+
+        # reverse complement augmentation
+        seq_rc = reverse_complement(seq)
+        seq_rc_kmers = kmerize(seq_rc, k=6, stride=1)
+        sequences.append(seq_rc_kmers)
+        labels.append(label)
+
+        if MAX_EXAMPLES is not None and len(sequences) >= MAX_EXAMPLES:
+            stop_early = True
+            break
+
+    if stop_early:
+        break
+
+sequences = np.array(sequences)
+labels = np.array(labels)
+
+print("Final dataset size:", len(sequences))
 
 # ==============================
 # CLASS WEIGHTS
 # ==============================
 
+unique_labels = np.unique(labels)
+if len(unique_labels) != NUM_CLASSES:
+    print(f"Warning: NUM_CLASSES = {NUM_CLASSES} but only {len(unique_labels)} classes in this sample ({unique_labels}).")
+
+active_num_classes = len(unique_labels)
+NUM_CLASSES = active_num_classes
+
 weights = compute_class_weight(
     class_weight="balanced",
-    classes=np.unique(labels),
+    classes=unique_labels,
     y=labels
 )
 
 class_weights = torch.tensor(weights, dtype=torch.float).to(DEVICE)
 
+print("Active class labels:", unique_labels)
 print("Class weights:", class_weights)
 
 # ==============================
@@ -72,41 +212,37 @@ print("Class weights:", class_weights)
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-print("Tokenizing dataset...")
-
-encodings = tokenizer(
-    list(sequences),
-    padding=True,
-    truncation=True,
-    max_length=MAX_LENGTH,
-    return_tensors="pt"
-)
-
 # ==============================
 # DATASET
 # ==============================
 
 class DNADataset(Dataset):
 
-    def __init__(self, encodings, labels, sequences):
-
-        self.encodings = encodings
-        self.labels = labels
+    def __init__(self, sequences, labels, tokenizer, max_length):
         self.sequences = sequences
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
+        encoding = self.tokenizer(
+            self.sequences[idx],
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
 
-        item = {key: val[idx] for key, val in self.encodings.items()}
-        item["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
-        item["sequence"] = self.sequences[idx]
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "labels": torch.tensor(self.labels[idx], dtype=torch.long)
+        }
 
-        return item
-
-
-dataset = DNADataset(encodings, labels, sequences)
+dataset = DNADataset(sequences, labels, tokenizer, MAX_LENGTH)
 
 train_size = int(0.9 * len(dataset))
 val_size = len(dataset) - train_size
@@ -117,16 +253,14 @@ train_loader = DataLoader(
     train_dataset,
     batch_size=BATCH_SIZE,
     shuffle=True,
-    num_workers=6,
-    pin_memory=True
+    num_workers=0  # Windows safe
 )
 
 val_loader = DataLoader(
     val_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=6,
-    pin_memory=True
+    num_workers=0
 )
 
 # ==============================
@@ -159,7 +293,7 @@ for epoch in range(EPOCHS):
 
         input_ids = batch["input_ids"].to(DEVICE)
         attention_mask = batch["attention_mask"].to(DEVICE)
-        labels = batch["labels"].to(DEVICE)
+        labels_batch = batch["labels"].to(DEVICE)
 
         with autocast():
 
@@ -172,14 +306,11 @@ for epoch in range(EPOCHS):
 
             loss = F.cross_entropy(
                 logits,
-                labels,
+                labels_batch,
                 weight=class_weights
             )
 
         scaler.scale(loss).backward()
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
         scaler.step(optimizer)
         scaler.update()
 
@@ -198,7 +329,6 @@ model.eval()
 all_preds = []
 all_labels = []
 all_probs = []
-all_sequences = []
 
 with torch.no_grad():
 
@@ -206,7 +336,7 @@ with torch.no_grad():
 
         input_ids = batch["input_ids"].to(DEVICE)
         attention_mask = batch["attention_mask"].to(DEVICE)
-        labels = batch["labels"].to(DEVICE)
+        labels_batch = batch["labels"].to(DEVICE)
 
         outputs = model(
             input_ids=input_ids,
@@ -219,9 +349,27 @@ with torch.no_grad():
         preds = torch.argmax(logits, dim=1)
 
         all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        all_labels.extend(labels_batch.cpu().numpy())
         all_probs.extend(probs.cpu().numpy())
-        all_sequences.extend(batch["sequence"])
+
+# ==============================
+# EVALUATION METRICS
+# ==============================
+
+mcc = matthews_corrcoef(all_labels, all_preds)
+f1_macro = f1_score(all_labels, all_preds, average="macro")
+
+print(f"Matthews Correlation Coefficient: {mcc:.4f}")
+print(f"Macro F1 Score: {f1_macro:.4f}")
+
+# save metrics to file
+with open(os.path.join(SAVE_PATH, "evaluation_metrics.txt"), "w") as f:
+    f.write(f"Matthews Correlation Coefficient: {mcc:.4f}\n")
+    f.write(f"Macro F1 Score: {f1_macro:.4f}\n")
+    f.write("Confidence stats:\n")
+    f.write(f"Average: {confidences.mean()}\n")
+    f.write(f"Min: {confidences.min()}\n")
+    f.write(f"Max: {confidences.max()}\n")
 
 # ==============================
 # CONFUSION MATRIX
@@ -234,25 +382,8 @@ sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
 plt.title("Chromatin State Confusion Matrix")
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
+plt.savefig(os.path.join(SAVE_PATH, "confusion_matrix.png"))
 plt.show()
-
-# ==============================
-# MOST CONFUSED STATES
-# ==============================
-
-confusions = []
-
-for i in range(len(cm)):
-    for j in range(len(cm)):
-        if i != j and cm[i][j] > 0:
-            confusions.append((i, j, cm[i][j]))
-
-confusions = sorted(confusions, key=lambda x: x[2], reverse=True)
-
-print("\nMost common misclassifications:")
-
-for a,p,c in confusions[:10]:
-    print(f"Actual {a} -> Predicted {p} : {c}")
 
 # ==============================
 # CONFIDENCE ANALYSIS
@@ -261,101 +392,22 @@ for a,p,c in confusions[:10]:
 all_probs = np.array(all_probs)
 confidences = np.max(all_probs, axis=1)
 
-print("\nConfidence Stats")
+print("Confidence stats:")
 print("Average:", confidences.mean())
 print("Min:", confidences.min())
 print("Max:", confidences.max())
 
-plt.hist(confidences, bins=50)
-plt.title("Model Confidence Distribution")
+plt.hist(confidences, bins=40)
+plt.title("Prediction Confidence Distribution")
 plt.xlabel("Softmax Probability")
 plt.ylabel("Frequency")
+plt.savefig(os.path.join(SAVE_PATH, "confidence_histogram.png"))
 plt.show()
-
-# ==============================
-# QUIESCENT STATE CONFIDENCE
-# ==============================
-
-QUIESCENT_LABEL = 18
-
-quiescent_conf = []
-
-for i,label in enumerate(all_labels):
-    if label == QUIESCENT_LABEL:
-        quiescent_conf.append(confidences[i])
-
-if len(quiescent_conf) > 0:
-    print("Average quiescent confidence:", np.mean(quiescent_conf))
-
-# ==============================
-# DISTANCE MATRIX ANALYSIS
-# ==============================
-
-try:
-
-    dist_df = pd.read_csv("chromatin_state_distances.csv", index_col=0)
-    distance_matrix = dist_df.values
-
-    distances = []
-
-    for true,pred in zip(all_labels, all_preds):
-
-        if true != pred:
-            distances.append(distance_matrix[true][pred])
-
-    if len(distances) > 0:
-        print("Average distance of misclassifications:", np.mean(distances))
-
-except:
-    print("Distance matrix not found, skipping.")
-
-# ==============================
-# GENOME TRACK VISUALIZATION
-# ==============================
-
-plt.figure(figsize=(14,4))
-
-plt.plot(all_labels[:1000], label="Actual")
-plt.plot(all_preds[:1000], label="Predicted")
-
-plt.title("Chromatin State Along DNA")
-plt.xlabel("Sequence Index")
-plt.ylabel("State")
-
-plt.legend()
-plt.show()
-
-# ==============================
-# MISCLASSIFIED SEQUENCES
-# ==============================
-
-misclassified = []
-
-for seq,true,pred in zip(all_sequences, all_labels, all_preds):
-
-    if true != pred:
-        misclassified.append((seq,true,pred))
-
-print("Total misclassified:", len(misclassified))
-
-# ==============================
-# SEQUENCE ALIGNMENT EXAMPLE
-# ==============================
-
-if len(misclassified) >= 2:
-
-    seq1 = misclassified[0][0]
-    seq2 = misclassified[1][0]
-
-    alignment = pairwise2.align.globalxx(seq1, seq2)[0]
-
-    print("\nExample sequence alignment:")
-    print(pairwise2.format_alignment(*alignment))
 
 # ==============================
 # SAVE MODEL
 # ==============================
 
-torch.save(model.state_dict(), "dnabert_chromatin_model.pt")
+torch.save(model.state_dict(), os.path.join(SAVE_PATH, "dnabert_chromatin_model.pt"))
 
 print("Training complete.")
