@@ -15,28 +15,30 @@ from torch.cuda.amp import autocast, GradScaler
 # SETTINGS
 # ==============================
 
+DEBUG=True 
+
 MODEL_NAME = "zhihan1996/DNA_bert_6"
 MAX_LENGTH = 200  # 6-mer model; we will use 200bp input windows
 CHUNK_SIZE = 200
 CONTEXT_SIZE = 50  # context window around BED region
 STEP_SIZE = 50  # overlapping windows for full data coverage
-BATCH_SIZE = 64
-EPOCHS = 10
+BATCH_SIZE = 16 if DEBUG else 64
+EPOCHS = 1 if DEBUG else 10 
 NUM_CLASSES = 18  # maximum expected labels (will auto-adjust to actual classes)
 
-SAMPLE_FRACTION = 1.0  # use all BED regions for full run
-MAX_EXAMPLES = None  # no cap; process entire dataset
-
+SAMPLE_FRACTION = 0.01 if DEBUG else 1.0  # use all BED regions for full run
+MAX_EXAMPLES = 500 if DEBUG else None  # no cap; process entire dataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Running on:", DEVICE)
+
 
 # ==============================
 # FILE PATHS (UPDATED FOR HOFFMAN2)
 # ==============================
 
 user_home = os.path.expanduser("~")
-FASTA_PATH = "/u/home/a/aparikh/dnabert/chr4.fa"  # validate version with lab
+FASTA_PATH = "/u/home/a/aparikh/dnabert/chr4.fa"
 BED_DIR = "/u/project/ernst/ernst/IHEC/FOURCOLS_NOHEADER_BROWSERFILES_ANNOTATIONS_MERGEDBINARY_BYCELLWITHIMPUTED_EPIATLAS_INCLUDEONLY"
 TARGET_LIST_PATH = "/u/home/a/aparikh/dnabert/fully_observed_samples.txt"
 SAVE_PATH = os.path.join(user_home, "dnabert_results")
@@ -45,17 +47,18 @@ os.makedirs(SAVE_PATH, exist_ok=True)
 # ==============================
 # LOAD CHROMOSOME (FASTA)
 # ==============================
-
 print("Loading chromosome...")
 
 dna_chunks = []
 with open(FASTA_PATH, "r") as f:
-    for line in f:
-        if line.startswith(">"):
-            continue
-        dna_chunks.append(line.strip().upper())
-
-dna_sequence = "".join(dna_chunks)
+    f.readline() # skip header
+    if DEBUG:
+        # Only read the first 5MB of the file
+        dna_sequence = f.read(5_000_000).replace('\n', '').upper()
+    else:
+        for line in f:
+            dna_chunks.append(line.strip().upper())
+        dna_sequence = "".join(dna_chunks)
 
 print("Chromosome length:", len(dna_sequence))
 
@@ -107,6 +110,10 @@ bed_df = pd.concat(frames, ignore_index=True)
 
 # filter to only chromosome 4 regions (since FASTA is chr4.fa)
 bed_df = bed_df[bed_df["chr"] == "chr4"].reset_index(drop=True)
+
+if DEBUG:
+    # Only keep BED regions that fall within our 5MB test window
+    bed_df = bed_df[bed_df["end"] < 5_000_000].reset_index(drop=True)
 
 if SAMPLE_FRACTION < 1.0:
     bed_df = bed_df.sample(frac=SAMPLE_FRACTION, random_state=42).reset_index(drop=True)
@@ -383,7 +390,7 @@ plt.title("Chromatin State Confusion Matrix")
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
 plt.savefig(os.path.join(SAVE_PATH, "confusion_matrix.png"))
-plt.show()
+# plt.show()
 
 # ==============================
 # CONFIDENCE ANALYSIS
