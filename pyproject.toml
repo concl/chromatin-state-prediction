@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "chromatin-state-prediction"
 version = "0.1.0"
@@ -6,4 +10,8 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.4.4",
+    "pandas>=3.0.2",
 ]
+
+[tool.setuptools.packages.find]
+include = ["templates*"]
