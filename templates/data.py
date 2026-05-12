@@ -214,14 +214,6 @@ def main():
         binned_df.to_parquet(
             PATH / "sample" / "binned_dataframe" / "test_binned.parquet", index=False
         )
-
-    if not (PATH / "sample" / "binned_dataframe" / "test_binned.parquet.gz").exists():
-        print("Compressing the sample binned DataFrame...")
-        (PATH / "sample" / "binned_dataframe").mkdir(parents=True, exist_ok=True)
-        gzip_file(
-            PATH / "sample" / "binned_dataframe" / "test_binned.parquet",
-            PATH / "sample" / "binned_dataframe" / "test_binned.parquet.gz",
-        )
     
     df = pd.read_parquet(PATH / "sample" / "binned_dataframe" / "test_binned.parquet")
     print(df.head())
