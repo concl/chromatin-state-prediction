@@ -1,11 +1,13 @@
 import os
+import socket
 import subprocess
 import sys
 import gzip
 import pandas as pd
 from shutil import copyfileobj
 import numpy as np
-from paramiko import SSHClient
+from paramiko import AutoAddPolicy, SSHClient
+from dotenv import load_dotenv
 
 from pathlib import Path
 
@@ -65,26 +67,83 @@ LABEL_TO_INDEX = {
 
 SOURCE = "ftp://hgdownload.cse.ucsc.edu/goldenPath/hg38/chromosomes/"
 
-def get_bed_files(n_files=10):
-    
+def get_bed_files(n_files: int = 10) -> list[str]:
+    """
+    Downloads up to `n_files` BED files from a remote server via SFTP.
+
+    Expects the environment variable `BED_FILES_REMOTE_PATH` to be set in the
+    format `hostname:/path/to/remote/dir/`.
+
+    Returns a list of filenames that were downloaded (or already present locally).
+    """
+    load_dotenv()  # Load environment variables from .env file
     remote_path = os.getenv("BED_FILES_REMOTE_PATH")
-    
+    if not remote_path:
+        raise ValueError(
+            "Environment variable BED_FILES_REMOTE_PATH is not set. "
+            "Set it to e.g. 'myhost:/data/bed_files/'"
+        )
+
+    # Ensure the remote directory path ends with a separator for safe joining
+    if ":" not in remote_path:
+        raise ValueError(
+            f"BED_FILES_REMOTE_PATH must be in 'host:/path/' format, got: {remote_path!r}"
+        )
+
+    hostname, remote_dir = remote_path.split(":", 1)
+    if not remote_dir.endswith("/"):
+        remote_dir += "/"
+
+    # Ensure local BED path exists
+    BED_PATH.mkdir(parents=True, exist_ok=True)
+
+    ssh_username = os.getenv("SSH_USERNAME")
+    ssh_password = os.getenv("SSH_PASSWORD")
+
     client = SSHClient()
     client.load_system_host_keys()
-    client.connect(remote_path.split(":")[0])
-    sftp = client.open_sftp()
-    
-    # install arbitrary number of bed files for testing in the remote directory to avoid OOM/disk space issues
-    remote_dir = remote_path.split(":")[1]
-    remote_files = sftp.listdir(remote_dir)
-    selected_files = remote_files[:n_files]
-    for file in selected_files:
-        local_path = BED_PATH / file
-        if not local_path.exists():
-            print(f"Downloading {file} from remote server...")
-            sftp.get(remote_dir + file, str(local_path))
-        else:
-            print(f"{file} already exists locally, skipping download.")
+    client.set_missing_host_key_policy(AutoAddPolicy())
+
+    sftp = None
+    try:
+        client.connect(
+            hostname,
+            username=ssh_username,
+            password=ssh_password,
+            timeout=10,
+        )
+        sftp = client.open_sftp()
+
+        # List and select up to n_files from the remote directory
+        remote_files = sftp.listdir(remote_dir)
+        selected_files = remote_files[:n_files]
+
+        downloaded: list[str] = []
+        for file in selected_files:
+            local_path = BED_PATH / file
+            if local_path.exists():
+                print(f"{file} already exists locally, skipping download.")
+            else:
+                print(f"Downloading {file} from remote server...")
+                sftp.get(remote_dir + file, str(local_path))
+            downloaded.append(file)
+
+        return downloaded
+
+    except socket.gaierror:
+        raise ConnectionError(
+            f"Cannot resolve hostname '{hostname}'. "
+            f"This server may only be reachable from a specific network (e.g., VPN or institutional network)."
+        )
+    except OSError as e:
+        raise ConnectionError(
+            f"Cannot connect to '{hostname}': {e}. "
+            f"Check that the host is reachable and you are on the correct network/VPN."
+        )
+    finally:
+        if sftp is not None:
+            sftp.close()
+        client.close()
     
     
     
