@@ -28,6 +28,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["templates*"]
 
+[project.scripts]
+hello = "templates.hello:main"
+
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple"
