@@ -161,6 +161,7 @@ def main():
 
     if not (PATH / "sample" / "binned_dataframe" / "test_binned.parquet").exists():
         print("Creating a sample binned DataFrame for the first BED file...")
+        (PATH / "sample" / "binned_dataframe").mkdir(parents=True, exist_ok=True)
         test_bed_file = BED_FILES[0]
         bed_data = read_bed_file(test_bed_file)
         binned_df = extract_binned_sequences(bed_data, bin_size=200)
@@ -170,6 +171,7 @@ def main():
 
     if not (PATH / "sample" / "binned_dataframe" / "test_binned.parquet.gz").exists():
         print("Compressing the sample binned DataFrame...")
+        (PATH / "sample" / "binned_dataframe").mkdir(parents=True, exist_ok=True)
         gzip_file(
             PATH / "sample" / "binned_dataframe" / "test_binned.parquet",
             PATH / "sample" / "binned_dataframe" / "test_binned.parquet.gz",
