@@ -24,8 +24,10 @@ class EnformerForSequenceClassification(nn.Module):
 
     def forward(self, input_ids):
         outputs = self.enformer(input_ids, return_only_embeddings=True)
-        pooled = outputs.mean(dim=1)
-        return self.classifier(pooled)
+        # outputs shape: [Batch, 896, 3072]
+        # Classifier transforms local embeddings into class logits
+        # Final shape: [Batch, 896, num_labels]
+        return self.classifier(outputs)
 
 class ShardedChromatinDataset(IterableDataset):
     """
@@ -40,6 +42,21 @@ class ShardedChromatinDataset(IterableDataset):
             self.files = sorted(list(self.data_dir.parent.glob("*.parquet")))
         if not self.files:
             print(f"Warning: No parquet files found in {self.data_dir}")
+        self._length = None
+
+    def __len__(self):
+        if self._length is None:
+            total = 0
+            for file_path in self.files:
+                df = pd.read_parquet(file_path)
+                if 'sequence' in df.columns:
+                    df = df.rename(columns={"sequence": "seq"})
+                if 'labels' not in df.columns and 'label' in df.columns:
+                    df = df.rename(columns={"label": "labels"})
+                df = df.dropna(subset=['seq', 'labels'])
+                total += len(df)
+            self._length = total
+        return self._length
 
     def __iter__(self):
         mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
@@ -49,18 +66,27 @@ class ShardedChromatinDataset(IterableDataset):
             df = pd.read_parquet(file_path)
             
             if 'sequence' in df.columns:
-                df = df.rename(columns={"sequence": "seq", "state": "label"})
-                
-            if not pd.api.types.is_numeric_dtype(df['label']):
-                # Extract int state if formatted as string ('1_TssA')
-                df['label'] = df['label'].astype(str).str.extract(r'(\d+)', expand=False).dropna().astype(int)
+                df = df.rename(columns={"sequence": "seq"})
             
-            df = df.dropna(subset=['seq', 'label'])
+            if 'labels' not in df.columns and 'label' in df.columns:
+                df = df.rename(columns={"label": "labels"})
+                
+            df = df.dropna(subset=['seq', 'labels'])
             
             for _, row in df.iterrows():
                 seq = str(row['seq']).upper()
-                # PyTorch expects labels in range [0, num_classes-1]
-                label = int(row['label']) - 1
+                labels = row['labels'] 
+                
+                # Format Labels Array
+                if isinstance(labels, (list, tuple)):
+                    # Extract the 896 labels matching Enformer's cropped output geometry
+                    # Enformer crops 320 bins from start and 320 from end of the 1536 bins.
+                    if len(labels) == 1536:
+                        labels = labels[320:-320]
+                    # PyTorch expects labels in range [0, num_classes-1]. So subtract 1.
+                    label_tensors = torch.tensor([int(lbl) - 1 for lbl in labels], dtype=torch.long)
+                else: # Fallback to single label format for unexpected legacy data
+                    label_tensors = torch.tensor(int(labels) - 1, dtype=torch.long)
 
                 mapped_seq = [mapping.get(nuc, 4) for nuc in seq]
                 tensor_seq = torch.tensor(mapped_seq, dtype=torch.long)
@@ -71,7 +97,7 @@ class ShardedChromatinDataset(IterableDataset):
                 else:
                     tensor_seq = tensor_seq[:target_len]
 
-                yield tensor_seq, torch.tensor(label, dtype=torch.long)
+                yield tensor_seq, label_tensors
 
 def compute_class_weights(data_dir: Path, num_labels: int = 18):
     """
@@ -88,10 +114,15 @@ def compute_class_weights(data_dir: Path, num_labels: int = 18):
     
     for file_path in files:
         df = pd.read_parquet(file_path)
-        col_name = "state" if "state" in df.columns else "label"
+        col_name = "labels" if "labels" in df.columns else ("state" if "state" in df.columns else "label")
         
-        # Ensure numeric extraction
-        if not pd.api.types.is_numeric_dtype(df[col_name]):
+        if 'labels' in df.columns:
+            import numpy as np
+            # Flatten lists of labels
+            all_labels = np.concatenate(df['labels'].values)
+            values = pd.Series(all_labels)
+        elif not pd.api.types.is_numeric_dtype(df[col_name]):
+            # Fallback legacy extraction
             values = df[col_name].astype(str).str.extract(r'(\d+)', expand=False).fillna(0).astype(int)
         else:
             values = df[col_name]
@@ -176,8 +207,11 @@ def main():
         
         for inputs, labels in dataloader:
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            outputs = model(inputs) # Shape: [Batch, 896, 18]
+            
+            # Flatten predictions and target arrays to compute Cross Entropy locally across bins
+            # outputs views into [Batch * 896, 18], labels into [Batch * 896]
+            loss = criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
             
             accelerator.backward(loss)
             
@@ -202,7 +236,7 @@ def main():
             with torch.no_grad():
                 for val_inputs, val_labels in val_dataloader:
                     val_outputs = model(val_inputs)
-                    loss = criterion(val_outputs, val_labels)
+                    loss = criterion(val_outputs.view(-1, val_outputs.size(-1)), val_labels.view(-1))
                     # Gather losses across all GPUs
                     loss_gathered = accelerator.gather(loss)
                     val_loss += loss_gathered.mean().item()

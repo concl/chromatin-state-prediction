@@ -4,5 +4,4 @@ __pycache__/
 dist/
 .env
 
-test_binned.parquet
-test_binned.parquet.gz
+*.parquet

@@ -4,6 +4,7 @@ import sys
 import gzip
 import pandas as pd
 from shutil import copyfileobj
+import numpy as np
 
 from pathlib import Path
 
@@ -146,65 +147,72 @@ def extract_binned_sequences(df: pd.DataFrame, bin_size: int = 200) -> pd.DataFr
     return pd.DataFrame(records)
 
 
-def extract_long_sequences(df: pd.DataFrame, window_size: int = 196608) -> pd.DataFrame:
+
+def extract_long_sequences(df: pd.DataFrame, window_size: int = 196608, stride: int = 98304, bin_size: int = 128) -> pd.DataFrame:
     """
-    Takes a dataframe (e.g. from read_bed_file) and extracts large context windows
-    around the midpoint of each annotated state, sized appropriately for models
-    like Enformer (default 196,608 bp).
-    
-    WARNING ON DATASET REPETITION (OVERFITTING):
-    This function currently extracts a 196kb window around the *center* of EVERY
-    single annotation in the BED file. Because BED file annotations can be very 
-    short (e.g., 200bp) and densely packed, taking a 196kb window around consecutive 
-    annotations will result in almost identical sequences being extracted over and 
-    over again. 
-    
-    For example, if you have 10 annotations within a 5kb region, this function will 
-    extract ten 196kb sequences that overlap by 99%, essentially feeding the model 
-    exact duplicates. This heavily biases the model and causes train loss to drop 
-    to 0 very quickly (overfitting to structural duplicates). 
-    
-    A better approach for Enformer is to tile the genome in non-overlapping (or 
-    slightly overlapping) 196kb windows, and predict a sequence of states for the 
-    bins within that window, rather than making a single label prediction for the 
-    entire window.
+    Extracts rolling contiguous sequences of size window_size, shifted by stride.
+    For each sequence, it creates an array of length window_size // bin_size, where
+    each element is the most common state annotation in that bin_size chunk.
+    Only keeps sequences where at least 95% of the region is annotated.
     """
     records = []
-    half_window = window_size // 2
-
+    
+    # We group by chromosome to load the genomic sequence into memory exactly once per chromosome.
     for chrom, group in df.groupby("chrom"):
         try:
             fasta_str = decompress_chromosome(chrom)
-            # Remove the FASTA header and join newlines to match 0-based indexing
-            seq = "".join(fasta_str.split("\n")[1:])
+            # Remove the FASTA header and joined newlines to match 0-based indexing
+            seq = "".join(fasta_str.split("\n")[1:]).upper()
         except FileNotFoundError:
             print(f"Warning: sequence for {chrom} not found, skipping...")
             continue
 
-        for _, row in group.iterrows():
-            start = row["start"]
-            end = row["end"]
-            state = row["state"]
-
-            # Define the center of the current annotated interval
-            center = (start + end) // 2
+        seq_len = len(seq)
+        
+        # Create a dense array for the entire chromosome track
+        # Initialize with 0 (unannotated background)
+        state_array = np.zeros(seq_len, dtype=np.int16)
+        
+        states = group["state"]
+        if not pd.api.types.is_numeric_dtype(states):
+            states = states.astype(str).str.extract(r'(\d+)', expand=False).fillna(0).astype(int)
+        
+        # Fast array assignment map representing sequence locations
+        for start, end, state in zip(group["start"], group["end"], states):
+            start = max(0, start)
+            end = min(seq_len, end)
+            if start < end:
+                state_array[start:end] = state
+                
+        # Slide window over the chromosome
+        for w_start in range(0, seq_len - window_size + 1, stride):
+            w_end = w_start + window_size
+            window_states = state_array[w_start:w_end]
             
-            chunk_start = center - half_window
-            chunk_end = center + half_window
+            # Skip regions that mostly contain padding/unknown states
+            if np.sum(window_states == 0) > (window_size * 0.05):
+                continue
+                
+            chunk_seq = seq[w_start:w_end]
             
-            # Ensure the chunk is fully within the valid sequence bounds
-            if chunk_start >= 0 and chunk_end <= len(seq):
-                chunk_seq = seq[chunk_start:chunk_end].upper()
-                if len(chunk_seq) == window_size:
-                    records.append(
-                        {
-                            "chrom": chrom,
-                            "start": chunk_start,
-                            "end": chunk_end,
-                            "state": state,
-                            "sequence": chunk_seq,
-                        }
-                    )
+            # Subdivide 196,608 length into 128bp bins -> Total of 1,536 bins.
+            # Shape is (1536, 128)
+            reshaped_states = window_states.reshape(-1, bin_size)
+            
+            # Fast most-frequent label per bin computation
+            # Using bincount to get the index of max occurrences in each 128bp bin
+            binned_labels = [int(np.bincount(row).argmax()) for row in reshaped_states]
+            
+            records.append(
+                {
+                    "chrom": chrom,
+                    "start": w_start,
+                    "end": w_end,
+                    "sequence": chunk_seq,
+                    # We store it as a list so parquet can serialize it properly
+                    "labels": binned_labels,
+                }
+            )
 
     return pd.DataFrame(records)
 
