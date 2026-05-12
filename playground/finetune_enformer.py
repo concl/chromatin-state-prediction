@@ -73,6 +73,48 @@ class ShardedChromatinDataset(IterableDataset):
 
                 yield tensor_seq, torch.tensor(label, dtype=torch.long)
 
+def compute_class_weights(data_dir: Path, num_labels: int = 18):
+    """
+    Scans the dataset to compute class counts, and returns normalized weights
+    inversely proportional to class frequencies to handle extreme imbalances.
+    """
+    print("Computing class weights from dataset...")
+    files = list(data_dir.glob("*.parquet"))
+    
+    if not files and data_dir.parent.exists():
+        files = list(data_dir.parent.glob("*.parquet"))
+        
+    counts = torch.zeros(num_labels, dtype=torch.float64)
+    
+    for file_path in files:
+        df = pd.read_parquet(file_path)
+        col_name = "state" if "state" in df.columns else "label"
+        
+        # Ensure numeric extraction
+        if not pd.api.types.is_numeric_dtype(df[col_name]):
+            values = df[col_name].astype(str).str.extract(r'(\d+)', expand=False).fillna(0).astype(int)
+        else:
+            values = df[col_name]
+            
+        freqs = values.value_counts()
+        for idx, count in freqs.items():
+            # ChromHMM states are 1-indexed (1-18), but arrays are 0-indexed (0-17)
+            if 1 <= idx <= num_labels:
+                counts[idx - 1] += count
+                
+    # Calculate inverse frequencies
+    # Add a small epsilon to avoid division by zero for completely missing classes
+    total = counts.sum()
+    if total == 0:
+        return torch.ones(num_labels)
+        
+    weights = total / (num_labels * (counts + 1e-5))
+    
+    # Normalize weights so they don't artificially blow up the learning rate
+    weights = weights / weights.sum() * num_labels
+    return weights
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune Enformer on multi-GPU")
     parser.add_argument("--data_dir", type=str, default="../sample/binned_dataframe/enformer_shards", help="Directory containing train sharded parquets")
@@ -116,7 +158,16 @@ def main():
     else:
         model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
         
-    criterion = nn.CrossEntropyLoss()
+    # Class Weights for Imbalanced Dataset
+    # Compute optimal weights dynamically from the exact training shards available
+    device = accelerator.device
+    raw_weights = compute_class_weights(data_dir_path, num_labels=18)
+    weights = raw_weights.to(device, dtype=torch.float32)
+    
+    if accelerator.is_main_process:
+        print(f"Computed class weights: {weights}")
+    
+    criterion = nn.CrossEntropyLoss(weight=weights)
     
     model.train()
     step = 0

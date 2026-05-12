@@ -151,6 +151,23 @@ def extract_long_sequences(df: pd.DataFrame, window_size: int = 196608) -> pd.Da
     Takes a dataframe (e.g. from read_bed_file) and extracts large context windows
     around the midpoint of each annotated state, sized appropriately for models
     like Enformer (default 196,608 bp).
+    
+    WARNING ON DATASET REPETITION (OVERFITTING):
+    This function currently extracts a 196kb window around the *center* of EVERY
+    single annotation in the BED file. Because BED file annotations can be very 
+    short (e.g., 200bp) and densely packed, taking a 196kb window around consecutive 
+    annotations will result in almost identical sequences being extracted over and 
+    over again. 
+    
+    For example, if you have 10 annotations within a 5kb region, this function will 
+    extract ten 196kb sequences that overlap by 99%, essentially feeding the model 
+    exact duplicates. This heavily biases the model and causes train loss to drop 
+    to 0 very quickly (overfitting to structural duplicates). 
+    
+    A better approach for Enformer is to tile the genome in non-overlapping (or 
+    slightly overlapping) 196kb windows, and predict a sequence of states for the 
+    bins within that window, rather than making a single label prediction for the 
+    entire window.
     """
     records = []
     half_window = window_size // 2
