@@ -5,6 +5,7 @@ import gzip
 import pandas as pd
 from shutil import copyfileobj
 import numpy as np
+from paramiko import SSHClient
 
 from pathlib import Path
 
@@ -64,6 +65,29 @@ LABEL_TO_INDEX = {
 
 SOURCE = "ftp://hgdownload.cse.ucsc.edu/goldenPath/hg38/chromosomes/"
 
+def get_bed_files(n_files=10):
+    
+    remote_path = os.getenv("BED_FILES_REMOTE_PATH")
+    
+    client = SSHClient()
+    client.load_system_host_keys()
+    client.connect(remote_path.split(":")[0])
+    sftp = client.open_sftp()
+    
+    # install arbitrary number of bed files for testing in the remote directory to avoid OOM/disk space issues
+    remote_dir = remote_path.split(":")[1]
+    remote_files = sftp.listdir(remote_dir)
+    selected_files = remote_files[:n_files]
+    for file in selected_files:
+        local_path = BED_PATH / file
+        if not local_path.exists():
+            print(f"Downloading {file} from remote server...")
+            sftp.get(remote_dir + file, str(local_path))
+        else:
+            print(f"{file} already exists locally, skipping download.")
+    
+    
+    
 
 def get_all_chromosomes(download_path: Path = DOWNLOAD_PATH):
     """

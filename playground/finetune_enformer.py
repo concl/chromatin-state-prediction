@@ -61,6 +61,7 @@ class ShardedChromatinDataset(IterableDataset):
     def __iter__(self):
         mapping = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
         target_len = 196608
+        target_bins = 896  # Enformer crops 320 from each end of 1536 bins
         
         for file_path in self.files:
             df = pd.read_parquet(file_path)
@@ -77,15 +78,15 @@ class ShardedChromatinDataset(IterableDataset):
                 seq = str(row['seq']).upper()
                 labels = row['labels'] 
                 
-                # Format Labels Array
-                if isinstance(labels, (list, tuple)):
-                    # Extract the 896 labels matching Enformer's cropped output geometry
-                    # Enformer crops 320 bins from start and 320 from end of the 1536 bins.
+                # Labels are stored as numpy arrays (from data.py extract_long_sequences)
+                # with length 1536 and values 1-18 (1-indexed ChromHMM states).
+                # Enformer crops 320 bins from start and 320 from end → 896 bins.
+                # PyTorch expects labels in range [0, num_classes-1], so subtract 1.
+                if hasattr(labels, '__len__'):
                     if len(labels) == 1536:
-                        labels = labels[320:-320]
-                    # PyTorch expects labels in range [0, num_classes-1]. So subtract 1.
-                    label_tensors = torch.tensor([int(lbl) - 1 for lbl in labels], dtype=torch.long)
-                else: # Fallback to single label format for unexpected legacy data
+                        labels = labels[320:-320]  # Crop to 896 bins
+                    label_tensors = torch.tensor(labels, dtype=torch.long) - 1
+                else:  # Fallback: single label
                     label_tensors = torch.tensor(int(labels) - 1, dtype=torch.long)
 
                 mapped_seq = [mapping.get(nuc, 4) for nuc in seq]
@@ -148,7 +149,7 @@ def compute_class_weights(data_dir: Path, num_labels: int = 18):
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune Enformer on multi-GPU")
-    parser.add_argument("--data_dir", type=str, default="../sample/binned_dataframe/enformer_shards", help="Directory containing train sharded parquets")
+    parser.add_argument("--data_dir", type=str, default="../sample/binned_dataframe/train_shards", help="Directory containing train sharded parquets")
     parser.add_argument("--val_data_dir", type=str, default=None, help="Directory containing validation sharded parquets")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size per device")
     parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
@@ -211,7 +212,8 @@ def main():
             
             # Flatten predictions and target arrays to compute Cross Entropy locally across bins
             # outputs views into [Batch * 896, 18], labels into [Batch * 896]
-            loss = criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+            # Cast to float32 because CrossEntropyLoss with class weights requires float32
+            loss = criterion(outputs.float().view(-1, outputs.size(-1)), labels.view(-1))
             
             accelerator.backward(loss)
             
@@ -236,7 +238,7 @@ def main():
             with torch.no_grad():
                 for val_inputs, val_labels in val_dataloader:
                     val_outputs = model(val_inputs)
-                    loss = criterion(val_outputs.view(-1, val_outputs.size(-1)), val_labels.view(-1))
+                    loss = criterion(val_outputs.float().view(-1, val_outputs.size(-1)), val_labels.view(-1))
                     # Gather losses across all GPUs
                     loss_gathered = accelerator.gather(loss)
                     val_loss += loss_gathered.mean().item()

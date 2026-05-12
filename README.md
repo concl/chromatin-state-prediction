@@ -27,7 +27,7 @@ accelerate launch \
   --data_dir ../sample/binned_dataframe/train_shards \
   --val_data_dir ../sample/binned_dataframe/val_shards \
   --batch_size 2 \
-  --epochs 3 \
+  --epochs 1 \
   --lr 5e-5 \
   --output_dir enformer_finetuned.pt
   ```
