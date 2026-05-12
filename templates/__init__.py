@@ -4,7 +4,7 @@ from .data import (
     BED_PATH,
     CHROMOSOMES,
     BED_FILES,
-    SOURCE,
+    CHROMOSOME_SOURCE,
     get_all_chromosomes,
     decompress_chromosome,
     read_bed_file,
