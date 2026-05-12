@@ -5,12 +5,17 @@ import torch
 import torch.nn as nn
 from torch.utils.data import IterableDataset, DataLoader
 from accelerate import Accelerator
-from transformers import EnformerModel
+from enformer_pytorch import Enformer
 
 class EnformerForSequenceClassification(nn.Module):
     def __init__(self, num_labels=18):
         super().__init__()
-        self.enformer = EnformerModel.from_pretrained("EleutherAI/enformer-official-rough")
+        # Patch Enformer to bypass transformers version conflict
+        if not hasattr(Enformer, "all_tied_weights_keys"):
+            Enformer.all_tied_weights_keys = property(lambda self: {})
+        
+        # Load from enformer-pytorch
+        self.enformer = Enformer.from_pretrained('EleutherAI/enformer-official-rough')
         self.classifier = nn.Linear(3072, num_labels)
 
     def forward(self, input_ids):
