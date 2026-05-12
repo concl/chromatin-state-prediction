@@ -32,3 +32,11 @@ accelerate launch \
   --output_dir enformer_finetuned.pt
   ```
 
+
+## Evaluating Enformer:
+```
+python playground/evaluate_enformer.py \
+    --model_path playground/checkpoints/enformer_step_100.pt \
+    --data_dir ../sample/binned_dataframe/val_shards \
+    --batch_size 1 --print_every 50
+```
