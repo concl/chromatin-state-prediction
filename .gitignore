@@ -6,3 +6,7 @@ dist/
 
 *.parquet
 *.parquet.gz
+
+checkpoints/
+
+human_genome/

@@ -154,7 +154,9 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size per device")
     parser.add_argument("--epochs", type=int, default=3, help="Training epochs")
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
-    parser.add_argument("--output_dir", type=str, default="enformer_finetuned.pt", help="Path to save model")
+    parser.add_argument("--output_dir", type=str, default="enformer_finetuned.pt", help="Path to save final model")
+    parser.add_argument("--save_every", type=int, default=100, help="Save a checkpoint every N training steps")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save intermediate checkpoints")
     args = parser.parse_args()
     
     load_dotenv()
@@ -199,6 +201,11 @@ def main():
     if accelerator.is_main_process:
         print(f"Computed class weights: {weights}")
     
+    # Setup checkpoint directory
+    checkpoint_dir = Path(__file__).resolve().parent / args.checkpoint_dir
+    if accelerator.is_main_process:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
     criterion = nn.CrossEntropyLoss(weight=weights)
     
     model.train()
@@ -227,6 +234,13 @@ def main():
             if step % 10 == 0 and accelerator.is_main_process:
                 print(f"Epoch {epoch} | Step {step} | Loss: {accumulated_loss/10:.4f}")
                 accumulated_loss = 0.0
+            
+            # Save checkpoint every --save_every steps
+            if step % args.save_every == 0 and step > 0 and accelerator.is_main_process:
+                ckpt_path = checkpoint_dir / f"enformer_step_{step}.pt"
+                print(f"Saving checkpoint to {ckpt_path}...")
+                unwrapped = accelerator.unwrap_model(model)
+                torch.save(unwrapped.state_dict(), ckpt_path)
             
             step += 1
             
