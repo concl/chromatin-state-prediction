@@ -146,6 +146,52 @@ def extract_binned_sequences(df: pd.DataFrame, bin_size: int = 200) -> pd.DataFr
     return pd.DataFrame(records)
 
 
+def extract_long_sequences(df: pd.DataFrame, window_size: int = 196608) -> pd.DataFrame:
+    """
+    Takes a dataframe (e.g. from read_bed_file) and extracts large context windows
+    around the midpoint of each annotated state, sized appropriately for models
+    like Enformer (default 196,608 bp).
+    """
+    records = []
+    half_window = window_size // 2
+
+    for chrom, group in df.groupby("chrom"):
+        try:
+            fasta_str = decompress_chromosome(chrom)
+            # Remove the FASTA header and join newlines to match 0-based indexing
+            seq = "".join(fasta_str.split("\n")[1:])
+        except FileNotFoundError:
+            print(f"Warning: sequence for {chrom} not found, skipping...")
+            continue
+
+        for _, row in group.iterrows():
+            start = row["start"]
+            end = row["end"]
+            state = row["state"]
+
+            # Define the center of the current annotated interval
+            center = (start + end) // 2
+            
+            chunk_start = center - half_window
+            chunk_end = center + half_window
+            
+            # Ensure the chunk is fully within the valid sequence bounds
+            if chunk_start >= 0 and chunk_end <= len(seq):
+                chunk_seq = seq[chunk_start:chunk_end].upper()
+                if len(chunk_seq) == window_size:
+                    records.append(
+                        {
+                            "chrom": chrom,
+                            "start": chunk_start,
+                            "end": chunk_end,
+                            "state": state,
+                            "sequence": chunk_seq,
+                        }
+                    )
+
+    return pd.DataFrame(records)
+
+
 def gzip_file(input_path: Path, output_path: Path):
     with open(input_path, "rb") as f_in:
         with gzip.open(output_path, "wb") as f_out:
