@@ -30,7 +30,7 @@ accelerate launch \
   --epochs 1 \
   --lr 5e-5 \
   --output_dir enformer_finetuned.pt
-  ```
+```
 
 
 ## Evaluating Enformer:

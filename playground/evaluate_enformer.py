@@ -15,10 +15,15 @@ Usage:
 """
 
 import argparse
+import os
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend for headless PNG generation
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -52,30 +57,81 @@ STATE_NAMES = [
 ]
 
 
-def compute_metrics(correct, total):
+def compute_metrics(confusion):
     """
-    Computes per-class accuracy, balanced accuracy, and overall accuracy.
+    Computes per-class accuracy, balanced accuracy, and overall accuracy
+    from a confusion matrix.
     
     Args:
-        correct: 1D array of per-class correct counts
-        total: 1D array of per-class total counts
+        confusion: 2D numpy array [num_classes, num_classes] where
+                   confusion[i, j] = count of true class i predicted as class j.
     
     Returns:
-        Dict with per_class_acc, balanced_acc, overall_acc
+        Dict with per_class_acc, balanced_acc, overall_acc, confusion
     """
-    # Avoid division by zero for missing classes
-    per_class_acc = np.zeros_like(correct, dtype=np.float64)
-    mask = total > 0
-    per_class_acc[mask] = correct[mask] / total[mask]
-    
+    num_classes = confusion.shape[0]
+    total_per_class = confusion.sum(axis=1)  # true class counts
+    correct_per_class = np.diag(confusion)   # correct predictions per class
+
+    per_class_acc = np.zeros(num_classes, dtype=np.float64)
+    mask = total_per_class > 0
+    per_class_acc[mask] = correct_per_class[mask] / total_per_class[mask]
+
     balanced_acc = per_class_acc[mask].mean() if mask.any() else 0.0
-    overall_acc = correct.sum() / total.sum() if total.sum() > 0 else 0.0
-    
+    overall_acc = correct_per_class.sum() / total_per_class.sum() if total_per_class.sum() > 0 else 0.0
+
     return {
         "per_class_acc": per_class_acc,
         "balanced_acc": balanced_acc,
         "overall_acc": overall_acc,
+        "confusion": confusion,
+        "total_per_class": total_per_class,
     }
+
+
+def plot_confusion_matrix(confusion, state_names, title, save_path):
+    """
+    Plots a normalized confusion matrix and saves it as a PNG.
+    
+    Args:
+        confusion: 2D numpy array [num_classes, num_classes] (raw counts).
+        state_names: list of class label strings.
+        title: plot title string.
+        save_path: Path or str where the PNG will be saved.
+    """
+    num_classes = confusion.shape[0]
+    # Row-normalize: each row sums to 1 (recall / per-class accuracy)
+    row_sums = confusion.sum(axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cm_norm = confusion.astype(np.float64) / row_sums
+        cm_norm[np.isnan(cm_norm)] = 0.0
+
+    fig, ax = plt.subplots(figsize=(14, 12))
+    sns.heatmap(
+        cm_norm,
+        annot=True,
+        fmt=".2f",
+        cmap="Blues",
+        xticklabels=state_names,
+        yticklabels=state_names,
+        vmin=0,
+        vmax=1,
+        linewidths=0.5,
+        linecolor="white",
+        cbar_kws={"label": "Fraction of true class"},
+        ax=ax,
+    )
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+    plt.xticks(rotation=45, ha="right", fontsize=8)
+    plt.yticks(rotation=0, fontsize=8)
+    plt.tight_layout()
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"  Confusion matrix saved to {save_path}")
 
 
 def main():
@@ -117,11 +173,15 @@ def main():
 
     # --- Accumulators ---
     num_classes = 18
-    correct = np.zeros(num_classes, dtype=np.int64)
-    total = np.zeros(num_classes, dtype=np.int64)
+    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
     
     step = 0
     total_bins_processed = 0
+
+    # Output directory for confusion matrices
+    model_name = model_path.stem  # e.g. "enformer_step_100"
+    temp_dir = Path(__file__).resolve().parent / "temp"
+    temp_dir.mkdir(exist_ok=True)
 
     print("\n=== Starting evaluation ===\n")
     
@@ -139,35 +199,43 @@ def main():
             preds_flat = predictions.cpu().numpy().ravel()
             labels_flat = labels.cpu().numpy().ravel()
 
-            # Accumulate per-class counts
-            for c in range(num_classes):
-                mask = labels_flat == c
-                correct[c] += (preds_flat[mask] == c).sum()
-                total[c] += mask.sum()
+            # Accumulate into confusion matrix
+            for t, p in zip(labels_flat, preds_flat):
+                confusion[t, p] += 1
 
             total_bins_processed += len(preds_flat)
             step += 1
 
             # --- Print intermediate results ---
             if step % args.print_every == 0:
-                metrics = compute_metrics(correct, total)
+                metrics = compute_metrics(confusion)
                 print(f"--- Step {step} ({total_bins_processed:,} bins processed) ---")
                 print(f"  Overall Accuracy:  {metrics['overall_acc']:.4f}")
                 print(f"  Balanced Accuracy: {metrics['balanced_acc']:.4f}")
                 print(f"  Per-class accuracy:")
                 for c in range(num_classes):
-                    if total[c] > 0:
+                    t = metrics["total_per_class"][c]
+                    if t > 0:
                         print(f"    {STATE_NAMES[c]:>14s}: {metrics['per_class_acc'][c]:.4f}  "
-                              f"(n={total[c]:,})")
+                              f"(n={t:,})")
                     else:
                         print(f"    {STATE_NAMES[c]:>14s}:  N/A  (no samples)")
+
+                # Save intermediate confusion matrix
+                cm_path = temp_dir / f"{model_name}_step{step}_confusion.png"
+                plot_confusion_matrix(
+                    confusion,
+                    STATE_NAMES,
+                    f"Confusion Matrix — {model_name}  |  Step {step} ({total_bins_processed:,} bins)",
+                    cm_path,
+                )
                 print()
 
     # --- Final results ---
     print("=" * 60)
     print("FINAL EVALUATION RESULTS")
     print("=" * 60)
-    metrics = compute_metrics(correct, total)
+    metrics = compute_metrics(confusion)
     print(f"Total bins evaluated: {total_bins_processed:,}")
     print(f"Overall Accuracy:     {metrics['overall_acc']:.4f}")
     print(f"Balanced Accuracy:    {metrics['balanced_acc']:.4f}")
@@ -177,12 +245,22 @@ def main():
     # Sort by accuracy descending
     class_results = []
     for c in range(num_classes):
-        if total[c] > 0:
-            class_results.append((c, metrics['per_class_acc'][c], total[c]))
+        t = metrics["total_per_class"][c]
+        if t > 0:
+            class_results.append((c, metrics['per_class_acc'][c], t))
     class_results.sort(key=lambda x: x[1], reverse=True)
     
     for c, acc, n in class_results:
         print(f"  {STATE_NAMES[c]:>14s}: {acc:.4f}  (n={n:,})")
+
+    # Save final confusion matrix
+    cm_path = temp_dir / f"{model_name}_final_confusion.png"
+    plot_confusion_matrix(
+        confusion,
+        STATE_NAMES,
+        f"Confusion Matrix — {model_name}  |  Final ({total_bins_processed:,} bins)",
+        cm_path,
+    )
 
 
 if __name__ == "__main__":
