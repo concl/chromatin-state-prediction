@@ -7,7 +7,18 @@ Thin CLI entry point — all heavy lifting is delegated to:
     templates.enformer_trainer   → EnformerForSequenceClassification, EnformerTrainer
 
 Usage:
-    python finetune_enformer.py --data_dir ../sample/binned_dataframe/train_shards --epochs 3
+    accelerate launch \
+        --multi_gpu \
+        --num_processes 3 \
+        --gpu_ids 1,2,3 \
+        --mixed_precision bf16 \
+        playground/finetune_enformer.py \
+        --data_dir ../sample/binned_dataframe/train_shards \
+        --val_data_dir ../sample/binned_dataframe/val_shards \
+        --batch_size 2 \
+        --epochs 1 \
+        --lr 5e-5 \
+        --output_dir enformer_finetuned.pt
 """
 
 from __future__ import annotations

@@ -27,7 +27,7 @@ BED_FILES = [
 CHROMOSOME_SOURCE = "ftp://hgdownload.cse.ucsc.edu/goldenPath/hg38/chromosomes/"
 
 
-def get_bed_files(n_files: int = 10) -> list[str]:
+def get_bed_files(n_files: int = 0, file_names: list[str] = None) -> list[str]:
     """
     Downloads up to `n_files` BED files from a remote server via SFTP.
 
@@ -76,8 +76,11 @@ def get_bed_files(n_files: int = 10) -> list[str]:
 
         # List and select up to n_files from the remote directory
         remote_files = sftp.listdir(remote_dir)
-        selected_files = remote_files[:n_files]
-
+        if not file_names:
+            selected_files = remote_files[:n_files] if n_files > 0 else remote_files
+        else:
+            selected_files = [f for f in remote_files if f in file_names]
+        
         downloaded: list[str] = []
         for file in selected_files:
             local_path = BED_PATH / file
@@ -273,7 +276,7 @@ def gzip_file(input_path: Path, output_path: Path):
             copyfileobj(f_in, f_out)
 
 
-def generate_shards(bed_file: str = BED_FILES[0]):
+def generate_shards(bed_file: str):
     train_dir = PATH / "sample" / "binned_dataframe" / "train_shards"
     val_dir = PATH / "sample" / "binned_dataframe" / "val_shards"
 

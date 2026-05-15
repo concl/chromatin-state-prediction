@@ -98,11 +98,7 @@ class EnformerTrainer:
 
         self._saved_checkpoints: list[Path] = []
         self._global_step: int = 0
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
+    
     def train(
         self,
         train_dataloader,
@@ -148,9 +144,7 @@ class EnformerTrainer:
             torch.save(unwrapped.state_dict(), path)
             print(f"Model saved to {path}")
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # ----- Internal helpers -----
 
     def _train_one_epoch(self, dataloader, epoch: int) -> None:
         accumulated_loss = 0.0
