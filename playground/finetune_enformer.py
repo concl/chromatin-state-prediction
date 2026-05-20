@@ -1,23 +1,23 @@
-"""
-Fine-tune Enformer for chromatin-state prediction (18-class classification).
+#!/usr/bin/env python3
+"""Fine-tune Enformer for chromatin-state prediction (18-class classification).
 
-Thin CLI entry point — all heavy lifting is delegated to:
+Thin CLI entry point; all heavy lifting is delegated to:
 
-    templates.enformer_dataset   → ShardedChromatinDataset, class weights
-    templates.enformer_trainer   → EnformerForSequenceClassification, EnformerTrainer
+    templates.enformer_dataset -> ShardedChromatinDataset, class weights
+    templates.enformer_trainer -> EnformerForSequenceClassification, EnformerTrainer
 
 Usage:
-    accelerate launch \
-        --multi_gpu \
-        --num_processes 3 \
-        --gpu_ids 1,2,3 \
-        --mixed_precision bf16 \
-        playground/finetune_enformer.py \
-        --data_dir ../sample/binned_dataframe/train_shards \
-        --val_data_dir ../sample/binned_dataframe/val_shards \
-        --batch_size 2 \
-        --epochs 1 \
-        --lr 5e-5 \
+    accelerate launch \\
+        --multi_gpu \\
+        --num_processes 3 \\
+        --gpu_ids 1,2,3 \\
+        --mixed_precision bf16 \\
+        playground/finetune_enformer.py \\
+        --data_dir ../sample/binned_dataframe/train_shards \\
+        --val_data_dir ../sample/binned_dataframe/val_shards \\
+        --batch_size 2 \\
+        --epochs 1 \\
+        --lr 5e-5 \\
         --output_dir enformer_finetuned.pt
 """
 

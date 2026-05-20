@@ -28,13 +28,22 @@ CHROMOSOME_SOURCE = "ftp://hgdownload.cse.ucsc.edu/goldenPath/hg38/chromosomes/"
 
 
 def get_bed_files(n_files: int = 0, file_names: list[str] = None) -> list[str]:
-    """
-    Downloads up to `n_files` BED files from a remote server via SFTP.
+    """Download BED files from a remote server via SFTP.
 
-    Expects the environment variable `BED_FILES_REMOTE_PATH` to be set in the
-    format `hostname:/path/to/remote/dir/`.
+    Expects the environment variable ``BED_FILES_REMOTE_PATH`` to be set in the
+    format ``hostname:/path/to/remote/dir/``.
 
-    Returns a list of filenames that were downloaded (or already present locally).
+    Args:
+        n_files: Maximum number of files to download. If 0, downloads all
+            available files. Ignored if ``file_names`` is provided.
+        file_names: Specific filenames to download. Overrides ``n_files``.
+
+    Returns:
+        List of filenames that were downloaded (or already present locally).
+
+    Raises:
+        ValueError: If ``BED_FILES_REMOTE_PATH`` is not set or has invalid format.
+        ConnectionError: If the remote host cannot be resolved or reached.
     """
     load_dotenv()  # Load environment variables from .env file
     remote_path = os.getenv("BED_FILES_REMOTE_PATH")
@@ -110,9 +119,14 @@ def get_bed_files(n_files: int = 0, file_names: list[str] = None) -> list[str]:
 
 
 def get_all_chromosomes(download_path: Path = DOWNLOAD_PATH):
-    """
-    Downloads the FASTA files for all human chromosomes from the UCSC Genome Browser
-    and saves them to the DOWNLOAD_PATH directory.
+    """Download FASTA files for all human chromosomes from UCSC Genome Browser.
+
+    Saves compressed ``.fa.gz`` files to ``download_path``. Skips chromosomes
+    that already exist locally.
+
+    Args:
+        download_path: Directory where chromosome FASTA files are saved.
+            Defaults to ``DOWNLOAD_PATH``.
     """
     for chrom in CHROMOSOMES:
         url = f"{CHROMOSOME_SOURCE}{chrom}.fa.gz"
@@ -125,8 +139,16 @@ def get_all_chromosomes(download_path: Path = DOWNLOAD_PATH):
 
 
 def decompress_chromosome(chrom: str) -> str:
-    """
-    Decompresses the FASTA file for a given chromosome and returns the sequence as a string.
+    """Decompress a chromosome FASTA file and return its sequence as a string.
+
+    Args:
+        chrom: Chromosome name (e.g. ``"chr1"``).
+
+    Returns:
+        The full genomic sequence as a string.
+
+    Raises:
+        FileNotFoundError: If the compressed FASTA file does not exist locally.
     """
     gz_path = DOWNLOAD_PATH / f"{chrom}.fa.gz"
     if not gz_path.exists():
@@ -137,8 +159,16 @@ def decompress_chromosome(chrom: str) -> str:
 
 
 def read_bed_file(bed_file: str) -> pd.DataFrame:
-    """
-    Reads a gzipped BED file and returns a DataFrame with columns: chrom, start, end, state.
+    """Read a gzipped BED file into a DataFrame.
+
+    Args:
+        bed_file: Filename of the gzipped BED file located in ``BED_PATH``.
+
+    Returns:
+        DataFrame with columns: ``chrom``, ``start``, ``end``, ``state``.
+
+    Raises:
+        FileNotFoundError: If the BED file does not exist locally.
     """
 
     bed_path = BED_PATH / bed_file
@@ -152,9 +182,19 @@ def read_bed_file(bed_file: str) -> pd.DataFrame:
 
 
 def extract_binned_sequences(df: pd.DataFrame, bin_size: int = 200) -> pd.DataFrame:
-    """
-    Decompresses the run-length encoding of a BED dataframe into smaller bins
-    and extracts the corresponding sequence from the human genome.
+    """Decompress BED run-length encoding into smaller bins with genomic sequences.
+
+    Groups BED records by chromosome, loads each chromosome's FASTA once,
+    then subdivides annotated regions into bins of ``bin_size`` bp and extracts
+    the corresponding DNA sequence.
+
+    Args:
+        df: BED DataFrame with columns ``chrom``, ``start``, ``end``, ``state``.
+        bin_size: Size of each bin in base pairs.
+
+    Returns:
+        DataFrame with columns: ``chrom``, ``start``, ``end``, ``state``,
+        ``sequence``.
     """
     records = []
 
@@ -197,11 +237,23 @@ def extract_long_sequences(
     stride: int = 98304,
     bin_size: int = 128,
 ) -> pd.DataFrame:
-    """
-    Extracts rolling contiguous sequences of size window_size, shifted by stride.
-    For each sequence, it creates an array of length window_size // bin_size, where
-    each element is the most common state annotation in that bin_size chunk.
-    Only keeps sequences where at least 95% of the region is annotated.
+    """Extract rolling contiguous sequences with per-bin chromatin state labels.
+
+    Slides a window of ``window_size`` bp across each chromosome with step
+    ``stride``. For each window, subdivides it into bins of ``bin_size`` bp and
+    assigns each bin the majority chromatin state annotation. Only keeps windows
+    where at least 95% of the region is annotated.
+
+    Args:
+        df: BED DataFrame with columns ``chrom``, ``start``, ``end``, ``state``.
+        window_size: Total length of each extracted sequence in bp.
+        stride: Step size between consecutive windows in bp.
+        bin_size: Size of each label bin in bp (window_size must be divisible
+            by bin_size).
+
+    Returns:
+        DataFrame with columns: ``chrom``, ``start``, ``end``, ``sequence``,
+        ``labels``.
     """
     records = []
 

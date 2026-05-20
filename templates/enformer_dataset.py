@@ -6,9 +6,12 @@ import torch
 
 
 class ShardedChromatinDataset(IterableDataset):
-    """
-    Streams data from a directory of sharded Parquet files to save memory.
+    """Streams data from a directory of sharded Parquet files to save memory.
+
     Yields sequence tensors and labels directly.
+
+    Args:
+        data_dir: Path to directory containing ``*.parquet`` shard files.
     """
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -78,9 +81,17 @@ class ShardedChromatinDataset(IterableDataset):
     
     @staticmethod
     def compute_class_weights(data_dir: Path, num_labels: int = 18):
-        """
+        """Compute normalized inverse-frequency class weights from the dataset.
+
         Scans the dataset to compute class counts, and returns normalized weights
         inversely proportional to class frequencies to handle extreme imbalances.
+
+        Args:
+            data_dir: Path to directory containing ``*.parquet`` shard files.
+            num_labels: Number of chromatin state classes.
+
+        Returns:
+            Tensor of shape ``(num_labels,)`` with normalized class weights.
         """
         print("Computing class weights from dataset...")
         files = list(data_dir.glob("*.parquet"))

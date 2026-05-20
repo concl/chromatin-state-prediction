@@ -1,5 +1,4 @@
-"""
-Enformer fine-tuning trainer with Accelerate-backed multi-GPU support.
+"""Enformer fine-tuning trainer with Accelerate-backed multi-GPU support.
 
 Usage:
     from templates.enformer_trainer import EnformerForSequenceClassification, EnformerTrainer
@@ -26,9 +25,12 @@ logger = logging.getLogger(__name__)
 class EnformerForSequenceClassification(nn.Module):
     """Wraps a pretrained Enformer trunk with a linear classification head.
 
-    Enformer produces embeddings of shape [B, 896, 3072].  This module
+    Enformer produces embeddings of shape [B, 896, 3072]. This module
     projects each of the 896 genomic bins to ``num_labels`` class logits,
     yielding output of shape [B, 896, num_labels].
+
+    Args:
+        num_labels: Number of chromatin state classes. Defaults to 18.
     """
 
     def __init__(self, num_labels: int = 18):
@@ -50,26 +52,19 @@ class EnformerForSequenceClassification(nn.Module):
 class EnformerTrainer:
     """Encapsulates the Enformer fine-tuning loop with checkpointing and validation.
 
-    Parameters
-    ----------
-    model : nn.Module
-        An ``EnformerForSequenceClassification`` (or Accelerator-wrapped equivalent).
-    optimizer : torch.optim.Optimizer
-    criterion : nn.Module
-        Loss function (e.g. ``CrossEntropyLoss`` with class weights).
-    accelerator : Accelerator
-        HuggingFace Accelerate instance managing device placement, mixed precision,
-        and gradient accumulation.
-    checkpoint_dir : Path
-        Directory where intermediate checkpoints are saved.
-    save_every : int
-        Save a checkpoint every *N* training steps.
-    num_checkpoints_to_keep : int
-        Only keep this many of the most recent checkpoints (old ones are deleted).
-    log_every : int
-        Log average loss every *N* steps (only on the main process).
-    grad_clip_norm : float | None
-        Max gradient norm for clipping; ``None`` disables.
+    Args:
+        model: An ``EnformerForSequenceClassification`` (or Accelerator-wrapped
+            equivalent).
+        optimizer: Optimizer for updating model parameters.
+        criterion: Loss function (e.g. ``CrossEntropyLoss`` with class weights).
+        accelerator: HuggingFace Accelerate instance managing device placement,
+            mixed precision, and gradient accumulation.
+        checkpoint_dir: Directory where intermediate checkpoints are saved.
+        save_every: Save a checkpoint every N training steps.
+        num_checkpoints_to_keep: Only keep this many of the most recent checkpoints
+            (old ones are deleted).
+        log_every: Log average loss every N steps (only on the main process).
+        grad_clip_norm: Max gradient norm for clipping; ``None`` disables.
     """
 
     def __init__(
@@ -105,7 +100,14 @@ class EnformerTrainer:
         val_dataloader=None,
         epochs: int = 3,
     ) -> None:
-        """Run the full multi-epoch training loop."""
+        """Run the full multi-epoch training loop.
+
+        Args:
+            train_dataloader: DataLoader yielding (inputs, labels) batches for
+                training.
+            val_dataloader: Optional DataLoader for validation after each epoch.
+            epochs: Number of training epochs.
+        """
         self._maybe_create_checkpoint_dir()
 
         for epoch in range(epochs):
@@ -118,7 +120,14 @@ class EnformerTrainer:
                     print(f"--- Epoch {epoch} Validation Loss: {val_loss:.4f} ---")
 
     def validate(self, dataloader) -> float:
-        """Run one validation pass; returns mean loss across all processes."""
+        """Run one validation pass.
+
+        Args:
+            dataloader: DataLoader yielding (inputs, labels) batches.
+
+        Returns:
+            Mean loss across all processes.
+        """
         self.model.eval()
         total_loss = 0.0
         steps = 0
@@ -136,7 +145,11 @@ class EnformerTrainer:
         return total_loss / max(steps, 1)
 
     def save_model(self, path: Path | str) -> None:
-        """Save the unwrapped model state dict."""
+        """Save the unwrapped model state dict.
+
+        Args:
+            path: File path where the model state dict will be saved.
+        """
         if self.accelerator.is_main_process:
             path = Path(path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,9 +191,15 @@ class EnformerTrainer:
             self._global_step += 1
 
     def _compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Flatten predictions and targets for per-bin cross-entropy."""
-        # outputs: [B, 896, C] → [B*896, C]  (cast to float32 for weighted CE)
-        # labels:  [B, 896]    → [B*896]
+        """Flatten predictions and targets for per-bin cross-entropy.
+
+        Args:
+            outputs: Model logits of shape [B, 896, C].
+            labels: Ground-truth labels of shape [B, 896].
+
+        Returns:
+            Scalar loss tensor.
+        """
         return self.criterion(
             outputs.float().view(-1, outputs.size(-1)),
             labels.view(-1),

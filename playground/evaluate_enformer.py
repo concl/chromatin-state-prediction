@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Evaluates a saved Enformer chromatin-state classifier on a validation dataset.
+"""Evaluate a saved Enformer chromatin-state classifier on a validation dataset.
 
 Computes per-class accuracy and balanced accuracy (average of per-class
 accuracies, which gives equal weight to rare and common classes).
@@ -8,9 +7,9 @@ Prints intermediate results every --print_every steps so you can monitor
 how performance evolves across different genomic regions.
 
 Usage:
-    python playground/evaluate_enformer.py \
-        --model_path checkpoints/enformer_step_100.pt \
-        --data_dir ../sample/binned_dataframe/val_shards \
+    python playground/evaluate_enformer.py \\
+        --model_path checkpoints/enformer_step_100.pt \\
+        --data_dir ../sample/binned_dataframe/val_shards \\
         --batch_size 1
 """
 
@@ -58,16 +57,15 @@ STATE_NAMES = [
 
 
 def compute_metrics(confusion):
-    """
-    Computes per-class accuracy, balanced accuracy, and overall accuracy
-    from a confusion matrix.
-    
+    """Compute per-class accuracy, balanced accuracy, and overall accuracy.
+
     Args:
         confusion: 2D numpy array [num_classes, num_classes] where
                    confusion[i, j] = count of true class i predicted as class j.
     
     Returns:
-        Dict with per_class_acc, balanced_acc, overall_acc, confusion
+        Dict with keys ``per_class_acc``, ``balanced_acc``, ``overall_acc``,
+        ``confusion``, and ``total_per_class``.
     """
     num_classes = confusion.shape[0]
     total_per_class = confusion.sum(axis=1)  # true class counts
