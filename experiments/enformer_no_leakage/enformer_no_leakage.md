@@ -1,7 +1,7 @@
 
 
 
-Converted data_human_sequences.bed to 196608 bp intervals, dropping windows with coordinates outside the chromosome Split into train, valid, and test sharded parquets:
+Converted data_human_sequences.bed to 196608 bp intervals, dropping windows with coordinates outside the chromosome. Split into train, valid, and test sharded parquets:
 
 (Run extend bed intervals, then run:)
 
