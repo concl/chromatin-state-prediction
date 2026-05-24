@@ -77,5 +77,7 @@ Per-class breakdown (sorted by accuracy):
     <img src="assets/enformer_finetuned_no_leakage_final_confusion.png" width="400"/>
     <figcaption>Confusion matrix for the finetuned Enformer model on the test set.</figcaption>
 </figure>
-    
+
+
+Note
 
