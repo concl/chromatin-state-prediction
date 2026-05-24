@@ -22,3 +22,10 @@ accelerate launch \
     --lr 5e-5 \
     --output_dir enformer_finetuned.pt
 """
+
+"""
+python playground/evaluate_enformer.py \
+    --model_path playground/enformer_finetuned.pt \
+    --data_dir ../sample/binned_dataframe_enformer/test_shards \
+    --batch_size 1
+"""

@@ -110,7 +110,7 @@ class EnformerTrainer:
         """
         self._maybe_create_checkpoint_dir()
 
-        for epoch in range(epochs):
+        for epoch in range(1, epochs + 1):
             self.model.train()
             self._train_one_epoch(train_dataloader, epoch)
 
