@@ -1,0 +1,19 @@
+Training Enformer model
+Starting distributed training using '/home/lukezeng/chromatin-state-prediction/sample/binned_dataframe_enformer/train_shards'...
+Computing class weights from dataset...
+Computing class weights from dataset...
+Computing class weights from dataset...
+Computing class weights from dataset...
+Computed class weights: tensor([4.9079e-01, 3.6471e+00, 2.4216e-01, 2.5659e-01, 1.5979e-02, 1.5975e-02,
+        2.4998e-01, 1.4336e+00, 2.2534e-01, 1.0285e+01, 2.7438e-02, 6.4654e-02,
+        3.0592e-02, 3.9714e-01, 5.6624e-01, 3.4207e-02, 1.5507e-02, 1.8380e-03],
+Epoch 0 | Step 0 | Loss: 0.2956
+Epoch 0 | Step 10 | Loss: 2.8657
+Epoch 0 | Step 20 | Loss: 2.7874
+Epoch 0 | Step 30 | Loss: 2.7103
+Epoch 0 | Step 40 | Loss: 2.6670
+Epoch 0 | Step 50 | Loss: 2.5932
+Epoch 0 | Step 60 | Loss: 2.4777
+Epoch 0 | Step 70 | Loss: 2.4350
+Epoch 0 | Step 80 | Loss: 2.5264
+Epoch 0 | Step 90 | Loss: 2.3372
