@@ -7,9 +7,9 @@ Prints intermediate results every --print_every steps so you can monitor
 how performance evolves across different genomic regions.
 
 Usage:
-    python playground/evaluate_enformer.py \\
-        --model_path checkpoints/enformer_step_100.pt \\
-        --data_dir ../sample/binned_dataframe/val_shards \\
+    python playground/evaluate_enformer.py \
+        --model_path checkpoints/enformer_step_100.pt \
+        --data_dir ../sample/binned_dataframe/val_shards \
         --batch_size 1
 """
 
