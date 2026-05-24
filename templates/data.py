@@ -14,6 +14,7 @@ from pathlib import Path
 PATH = Path(__file__).resolve().parent.parent
 DOWNLOAD_PATH = PATH / "sample" / "human_genome"
 BED_PATH = PATH / "sample" / "bed_files"
+ENFORMER_SEQUENCES_PATH = PATH / "sample" / "enformer_sequences"
 CHROMOSOMES = [f"chr{i}" for i in list(range(1, 23)) + ["X", "Y"]]
 
 BED_FILES = [
@@ -181,6 +182,115 @@ def read_bed_file(bed_file: str) -> pd.DataFrame:
     return data
 
 
+# hg38 chromosome sizes (from UCSC, used for bounds checking)
+HG38_CHROM_SIZES: dict[str, int] = {
+    "chr1": 248956422, "chr2": 242193529, "chr3": 198295559,
+    "chr4": 190214555, "chr5": 181538259, "chr6": 170805979,
+    "chr7": 159345973, "chr8": 145138636, "chr9": 138394717,
+    "chr10": 133797422, "chr11": 135086622, "chr12": 133275309,
+    "chr13": 114364328, "chr14": 107043718, "chr15": 101991189,
+    "chr16": 90338345, "chr17": 83257441, "chr18": 80373285,
+    "chr19": 58617616, "chr20": 64444167, "chr21": 46709983,
+    "chr22": 50818468, "chrX": 156040895,
+}
+
+
+def extend_bed_intervals(
+    input_bed: str | Path,
+    output_bed: str | Path,
+    extension_bp: int = 32768,
+    chrom_sizes: dict[str, int] | None = None,
+) -> pd.DataFrame:
+    """Extend BED intervals symmetrically and clip to chromosome boundaries.
+
+    Reads a BED file (non-gzipped, TSV format), extends each interval by
+    ``extension_bp`` on both the left and right, clips to ``[0, chr_len]``
+    bounds, and writes the result to a new BED file.  For example, 131,072 bp
+    intervals become 196,608 bp when ``extension_bp=32768`` (the Enformer
+    default input length).
+
+    Intervals that extend beyond chromosome boundaries are clipped.  If an
+    interval cannot reach the target length after clipping (i.e. the
+    chromosome is too short), a warning is printed and those rows are
+    **excluded** from the output.
+
+    Args:
+        input_bed: Path to the input BED file.
+        output_bed: Path where the extended BED file will be written.
+        extension_bp: Number of base pairs to add to each side.
+        chrom_sizes: Dictionary mapping chromosome names to their lengths.
+            Defaults to ``HG38_CHROM_SIZES`` (hg38 assembly).
+
+    Returns:
+        DataFrame with columns ``chrom``, ``start``, ``end``, and any extra
+        columns present in the input.
+    """
+    if chrom_sizes is None:
+        chrom_sizes = HG38_CHROM_SIZES
+
+    input_bed = Path(input_bed)
+    output_bed = Path(output_bed)
+
+    if not input_bed.exists():
+        raise FileNotFoundError(f"{input_bed} does not exist.")
+
+    df = pd.read_csv(input_bed, sep="\t", header=None)
+
+    # BED files typically have at least 4 columns: chrom, start, end, ...
+    df.columns = ["chrom", "start", "end"] + [
+        f"col_{i}" for i in range(3, df.shape[1])
+    ]
+
+    target_len = df["end"].iloc[0] - df["start"].iloc[0] + 2 * extension_bp
+
+    df["start"] = df["start"] - extension_bp
+    df["end"] = df["end"] + extension_bp
+
+    # Clip to chromosome boundaries
+    df["chr_len"] = df["chrom"].map(chrom_sizes)
+
+    missing = df["chr_len"].isna()
+    if missing.any():
+        missing_chroms = df.loc[missing, "chrom"].unique().tolist()
+        raise ValueError(
+            f"Chromosome sizes not found for: {missing_chroms}. "
+            f"Add them to chrom_sizes or pass a custom dictionary."
+        )
+
+    before_clip = len(df)
+
+    # Clip start to 0 and end to chromosome length
+    df["start"] = df["start"].clip(lower=0)
+    df["end"] = df["end"].clip(upper=df["chr_len"])
+
+    # Warn about and drop intervals that can't reach the target length
+    actual_len = df["end"] - df["start"]
+    too_short = actual_len < target_len
+    if too_short.any():
+        print(
+            f"Warning: {too_short.sum()} interval(s) cannot reach "
+            f"{target_len:,} bp after clipping (chromosome boundary):"
+        )
+        for _, row in df[too_short].iterrows():
+            print(
+                f"  {row['chrom']}: [{row['start']:,}, {row['end']:,}) "
+                f"= {actual_len[too_short].loc[row.name]:,} bp"
+            )
+        df = df[~too_short]
+
+    df = df.drop(columns=["chr_len"])
+
+    # Restore original column names (unnamed) for writing
+    df.to_csv(output_bed, sep="\t", header=False, index=False)
+
+    print(
+        f"Extended {before_clip} intervals by ±{extension_bp:,} bp → "
+        f"{len(df)} written to {output_bed} "
+        f"(target {target_len:,} bp each)"
+    )
+    return df
+
+
 def extract_binned_sequences(df: pd.DataFrame, bin_size: int = 200) -> pd.DataFrame:
     """Decompress BED run-length encoding into smaller bins with genomic sequences.
 
@@ -234,7 +344,7 @@ def extract_binned_sequences(df: pd.DataFrame, bin_size: int = 200) -> pd.DataFr
 def extract_long_sequences(
     df: pd.DataFrame,
     window_size: int = 196608,
-    stride: int = 98304,
+    stride: int = 128 * 896,
     bin_size: int = 128,
 ) -> pd.DataFrame:
     """Extract rolling contiguous sequences with per-bin chromatin state labels.
@@ -365,6 +475,183 @@ def generate_shards(bed_file: str):
         else:
             print(f"  No valid sequences found for {chrom}, skipping...")
             print(chrom_records.head())  # Debugging output for empty records
+
+
+def generate_shards_from_index(
+    index_bed: str | Path = ENFORMER_SEQUENCES_PATH / "data_human_sequences_enformer.bed",
+    annotation_bed_file: str | None = None,
+    output_dir: str | Path | None = None,
+    bin_size: int = 128,
+) -> dict[str, Path]:
+    """Generate train/valid/test shards using a predefined interval index.
+
+    Uses ``data_human_sequences_enformer.bed`` (or another index BED) to look up
+    exactly which 196,608 bp genomic intervals to extract.  For each interval,
+    the DNA sequence is pulled from the chromosome FASTA and chromatin-state
+    labels are derived from a ChromHMM annotation BED by intersecting the
+    interval with the annotation track and majority-voting within each
+    ``bin_size``-bp bin.
+
+    Shards are saved as Parquet files under ``output_dir``, one per split::
+
+        output_dir/
+        ├── train_shards/
+        │   ├── train_chr1.parquet
+        │   ├── train_chr2.parquet
+        │   └── ...
+        ├── valid_shards/
+        │   └── valid.parquet
+        └── test_shards/
+            └── test.parquet
+
+    Args:
+        index_bed: Path to the interval index BED file.  Must have columns
+            ``chrom``, ``start``, ``end``, ``split`` where ``split`` is one of
+            ``train``, ``valid``, ``test``.
+        annotation_bed_file: Filename of the gzipped ChromHMM BED file in
+            ``BED_PATH``.  Defaults to the first file in ``BED_FILES``.
+        output_dir: Root directory for output shards.  Defaults to
+            ``sample/binned_dataframe/``.
+        bin_size: Size of label bins in bp.  Must evenly divide the interval
+            length (196,608).
+
+    Returns:
+        Dict mapping split name to its output directory path.
+    """
+    if annotation_bed_file is None:
+        annotation_bed_file = BED_FILES[0]
+
+    if output_dir is None:
+        output_dir = PATH / "sample" / "binned_dataframe_enformer"
+    output_dir = Path(output_dir)
+
+    index_bed = Path(index_bed)
+    if not index_bed.exists():
+        raise FileNotFoundError(f"Index BED not found: {index_bed}")
+
+    # ------------------------------------------------------------------
+    # 1. Load the interval index
+    # ------------------------------------------------------------------
+    print(f"Loading interval index from {index_bed} ...")
+    index_df = pd.read_csv(index_bed, sep="\t", header=None)
+    index_df.columns = ["chrom", "start", "end", "split"]
+
+    window_size = int(index_df["end"].iloc[0] - index_df["start"].iloc[0])
+    if window_size % bin_size != 0:
+        raise ValueError(
+            f"window_size ({window_size}) must be divisible by bin_size ({bin_size})"
+        )
+    num_bins = window_size // bin_size
+
+    splits = index_df["split"].unique()
+    print(f"  {len(index_df)} intervals, window={window_size:,} bp, "
+          f"bins={num_bins} × {bin_size} bp, splits={splits.tolist()}")
+
+    # ------------------------------------------------------------------
+    # 2. Load the ChromHMM annotation track
+    # ------------------------------------------------------------------
+    print(f"Loading annotation track: {annotation_bed_file} ...")
+    annot_df = read_bed_file(annotation_bed_file)
+
+    # Normalise state column to integer
+    states = annot_df["state"]
+    if not pd.api.types.is_numeric_dtype(states):
+        states = (
+            states.astype(str)
+            .str.extract(r"(\d+)", expand=False)
+            .fillna(0)
+            .astype(int)
+        )
+    annot_df["state_int"] = states.astype(np.int16)
+
+    # ------------------------------------------------------------------
+    # 3. Process each chromosome once
+    # ------------------------------------------------------------------
+    for split_name in ["train", "valid", "test"]:
+        split_dir = output_dir / f"{split_name}_shards"
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+    all_chroms = index_df["chrom"].unique()
+    for chrom in sorted(all_chroms):
+        # Load chromosome sequence once
+        try:
+            fasta_str = decompress_chromosome(chrom)
+            seq = "".join(fasta_str.split("\n")[1:]).upper()
+        except FileNotFoundError:
+            print(f"  Warning: FASTA for {chrom} not found, skipping.")
+            continue
+
+        seq_len = len(seq)
+        chrom_index = index_df[index_df["chrom"] == chrom]
+        chrom_annot = annot_df[annot_df["chrom"] == chrom]
+
+        # Build a dense state array for this chromosome from annotations
+        state_array = np.zeros(seq_len, dtype=np.int16)
+        for _, row in chrom_annot.iterrows():
+            s = max(0, int(row["start"]))
+            e = min(seq_len, int(row["end"]))
+            if s < e:
+                state_array[s:e] = row["state_int"]
+
+        # Collect records per split for this chromosome, then write once
+        records_by_split: dict[str, list[dict]] = {
+            "train": [], "valid": [], "test": []
+        }
+        kept = 0
+        for _, interval in chrom_index.iterrows():
+            w_start = int(interval["start"])
+            w_end = int(interval["end"])
+            split_name = interval["split"]
+
+            if w_start < 0 or w_end > seq_len:
+                continue
+
+            window_states = state_array[w_start:w_end]
+
+            # Skip if >5% of the window is unannotated
+            if np.sum(window_states == 0) > (window_size * 0.05):
+                continue
+
+            chunk_seq = seq[w_start:w_end]
+            if len(chunk_seq) != window_size:
+                continue
+
+            # Majority-vote binning
+            reshaped = window_states.reshape(-1, bin_size)
+            binned_labels = [
+                int(np.bincount(row.astype(np.int32)).argmax())
+                for row in reshaped
+            ]
+
+            records_by_split[split_name].append({
+                "chrom": chrom,
+                "start": w_start,
+                "end": w_end,
+                "sequence": chunk_seq,
+                "labels": binned_labels,
+            })
+            kept += 1
+
+        # Write one Parquet file per (split, chromosome)
+        for split_name, recs in records_by_split.items():
+            if not recs:
+                continue
+            split_dir = output_dir / f"{split_name}_shards"
+            out_path = split_dir / f"{split_name}_{chrom}.parquet"
+            pd.DataFrame(recs).to_parquet(out_path, index=False)
+
+        skipped = len(chrom_index) - kept
+        msg = f"  ✓ {chrom}: {kept} intervals written"
+        if skipped:
+            msg += f" ({skipped} skipped)"
+        print(msg)
+
+    print("Done.")
+    return {
+        "train": output_dir / "train_shards",
+        "valid": output_dir / "valid_shards",
+        "test": output_dir / "test_shards",
+    }
 
 
 def main():
