@@ -79,5 +79,5 @@ Per-class breakdown (sorted by accuracy):
 </figure>
 
 
-Note
+Note that validation loss increased after the first epoch, which may indicate overfitting.
 
