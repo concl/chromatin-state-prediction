@@ -9,5 +9,8 @@
     * try on SNPs
 * more human genomes?
 * using dna methylation as validation: see if the chromatin states are associated
+* run inference on pangenome
 
 enformer_training_log_no_leakage.log tracks finetuning only on train sequences from enformer paper on the "IHECRE00001475.1_18_ChromHMM.bed.gz" epigenome
+
+
