@@ -14,8 +14,8 @@
 * UCSC format (Big Bed)
 * Conferences, journals
     * ISMB
-    
-    
+
+
 * Goals for now:
     * inference on pangenome
     * visuals
