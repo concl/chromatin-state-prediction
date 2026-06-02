@@ -14,9 +14,8 @@
 * UCSC format (Big Bed)
 * Conferences, journals
     * ISMB
-
-enformer_training_log_no_leakage.log tracks finetuning only on train sequences from enformer paper on the "IHECRE00001475.1_18_ChromHMM.bed.gz" epigenome
-
+    
+    
 * Goals for now:
     * inference on pangenome
     * visuals
