@@ -653,6 +653,73 @@ def generate_shards_from_index(
         "test": output_dir / "test_shards",
     }
 
+# Human-readable ChromHMM state names (1-indexed)
+STATE_NAMES = [
+    "1_TssA",
+    "2_TssFlnk",
+    "3_TssFlnkU",
+    "4_TssFlnkD",
+    "5_Tx",
+    "6_TxWk",
+    "7_EnhG1",
+    "8_EnhG2",
+    "9_EnhA1",
+    "10_EnhA2",
+    "11_EnhWk",
+    "12_ZNF/Rpts",
+    "13_Het",
+    "14_TssBiv",
+    "15_EnhBiv",
+    "16_ReprPC",
+    "17_ReprPCWk",
+    "18_Quies",
+]
+
+
+def merge_bed_intervals(
+    predictions,
+    state_names: list[str] | None = None,
+) -> pd.DataFrame:
+    """Merge adjacent same-state genomic bins into BED intervals.
+
+    Takes an iterable of ``(chrom, start, end, state)`` tuples (sorted by
+    position) and collapses consecutive bins that share the same chromosome
+    and state into larger intervals, producing a compact BED-style annotation.
+
+    Args:
+        predictions: Iterable of ``(chrom, start, end, state)`` tuples.
+        state_names: Optional list mapping 1-indexed state integers to
+            human-readable names (e.g. ``"1_TssA"``).  If provided, the
+            returned DataFrame will have a ``name`` column.
+
+    Returns:
+        DataFrame with columns ``chrom``, ``start``, ``end``, ``state``
+        (and optionally ``name``).
+    """
+    records = []
+    current = None  # (chrom, start, end, state)
+
+    for chrom, start, end, state in predictions:
+        if current is None:
+            current = [chrom, start, end, state]
+        elif current[0] == chrom and current[3] == state and current[2] == start:
+            # Extend the current interval
+            current[2] = end
+        else:
+            records.append(tuple(current))
+            current = [chrom, start, end, state]
+
+    if current is not None:
+        records.append(tuple(current))
+
+    df = pd.DataFrame(records, columns=["chrom", "start", "end", "state"])
+    df["state"] = df["state"].astype(int)
+
+    if state_names is not None:
+        df["name"] = df["state"].apply(lambda s: state_names[s - 1])
+
+    return df
+
 
 def main():
     if not DOWNLOAD_PATH.exists():
