@@ -174,7 +174,9 @@ def read_bed_file(bed_file: str) -> pd.DataFrame:
 
     bed_path = BED_PATH / bed_file
     if not bed_path.exists():
-        raise FileNotFoundError(f"{bed_path} does not exist.")
+        bed_path = PATH / bed_file
+        if not bed_path.exists():
+            raise FileNotFoundError(f"{bed_file} not found in {BED_PATH} or {PATH}")
 
     with gzip.open(bed_path, "rt") as f:
         data = pd.read_csv(f, sep="\t", header=None)
