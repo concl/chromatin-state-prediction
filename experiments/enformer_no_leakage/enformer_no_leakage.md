@@ -26,8 +26,8 @@ accelerate launch \
     --gpu_ids 0,1,2,3 \
     --mixed_precision bf16 \
     playground/finetune_enformer.py \
-    --data_dir ../sample/binned_dataframe_enformer/train_shards \
-    --val_data_dir ../sample/binned_dataframe_enformer/valid_shards \
+    --data_dir ../data/binned_dataframe_enformer/train_shards \
+    --val_data_dir ../data/binned_dataframe_enformer/valid_shards \
     --batch_size 2 \
     --epochs 2 \
     --lr 5e-5 \
@@ -38,7 +38,7 @@ Validated with test windows:
 ```
 python playground/evaluate_enformer.py \
     --model_path playground/enformer_finetuned.pt \
-    --data_dir ../sample/binned_dataframe_enformer/test_shards \
+    --data_dir ../data/binned_dataframe_enformer/test_shards \
     --batch_size 1
 ```
 

@@ -513,7 +513,7 @@ def generate_shards_from_index(
         annotation_bed_file: Filename of the gzipped ChromHMM BED file in
             ``BED_PATH``.  Defaults to the first file in ``BED_FILES``.
         output_dir: Root directory for output shards.  Defaults to
-            ``sample/binned_dataframe/``.
+            ``data/binned_dataframe/``.
         bin_size: Size of label bins in bp.  Must evenly divide the interval
             length (196,608).
 

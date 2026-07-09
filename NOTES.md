@@ -5,9 +5,12 @@
 * visualize the chromatin states
 * longer sequences?
 * test on other epigenomes
+
 * test on variant effect prediction task
     * try on SNPs
-        * EQTLs, 
+        * EQTLs? idk
+    * Probably should look into exactly how we would do this
+        
 * more human genomes?
 * using dna methylation as validation: see if the chromatin states are associated
 * run inference on pangenome
@@ -20,4 +23,5 @@
     * inference on pangenome
     * visuals
     * activation maximization
+    * grelu comparison
 
