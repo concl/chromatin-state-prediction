@@ -12,9 +12,9 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parent.parent
-DOWNLOAD_PATH = PATH / "sample" / "human_genome"
-BED_PATH = PATH / "sample" / "bed_files"
-ENFORMER_SEQUENCES_PATH = PATH / "sample" / "enformer_sequences"
+DOWNLOAD_PATH = PATH / "data" / "human_genome"
+BED_PATH = PATH / "data" / "bed_files"
+ENFORMER_SEQUENCES_PATH = PATH / "data" / "enformer_sequences"
 CHROMOSOMES = [f"chr{i}" for i in list(range(1, 23)) + ["X", "Y"]]
 
 BED_FILES = [
@@ -441,8 +441,8 @@ def gzip_file(input_path: Path, output_path: Path):
 
 
 def generate_shards(bed_file: str):
-    train_dir = PATH / "sample" / "binned_dataframe" / "train_shards"
-    val_dir = PATH / "sample" / "binned_dataframe" / "val_shards"
+    train_dir = PATH / "data" / "binned_dataframe" / "train_shards"
+    val_dir = PATH / "data" / "binned_dataframe" / "val_shards"
 
     train_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
@@ -524,7 +524,7 @@ def generate_shards_from_index(
         annotation_bed_file = BED_FILES[0]
 
     if output_dir is None:
-        output_dir = PATH / "sample" / "binned_dataframe_enformer"
+        output_dir = PATH / "data" / "binned_dataframe_enformer"
     output_dir = Path(output_dir)
 
     index_bed = Path(index_bed)
@@ -722,27 +722,3 @@ def merge_bed_intervals(
 
     return df
 
-
-def main():
-    if not DOWNLOAD_PATH.exists():
-        DOWNLOAD_PATH.mkdir(parents=True)
-    if not BED_PATH.exists():
-        BED_PATH.mkdir(parents=True)
-    get_all_chromosomes()
-
-    if not (PATH / "sample" / "binned_dataframe" / "test_binned.parquet").exists():
-        print("Creating a sample binned DataFrame for the first BED file...")
-        (PATH / "sample" / "binned_dataframe").mkdir(parents=True, exist_ok=True)
-        test_bed_file = BED_FILES[0]
-        bed_data = read_bed_file(test_bed_file)
-        binned_df = extract_binned_sequences(bed_data, bin_size=200)
-        binned_df.to_parquet(
-            PATH / "sample" / "binned_dataframe" / "test_binned.parquet", index=False
-        )
-
-    df = pd.read_parquet(PATH / "sample" / "binned_dataframe" / "test_binned.parquet")
-    print(df.head())
-
-
-if __name__ == "__main__":
-    main()

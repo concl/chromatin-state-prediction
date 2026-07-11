@@ -12,7 +12,7 @@
 Run the following command to download the human genome:
 
 ```
-python templates.data.py
+python scripts/get_data.py
 ```
 
 
